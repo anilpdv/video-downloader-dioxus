@@ -443,11 +443,7 @@ fn DownloadCard(download: Download) -> Element {
                         button {
                             class: "flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
                             onclick: move |_| show_player.set(!show_player()),
-                            {if show_player() {
-                                "Close Player"
-                            } else {
-                                "Play Media"
-                            }}
+                            {if show_player() { "Close Player" } else { "Play Media" }}
                         }
 
                         // Open folder button
