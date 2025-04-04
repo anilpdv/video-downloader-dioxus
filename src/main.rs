@@ -3,9 +3,10 @@
 use dioxus::prelude::*;
 
 use components::Navbar;
-use views::{Blog, Download, GetInfo, Home};
+use views::{Blog, Download, Downloads, GetInfo, Home};
 
 mod components;
+mod database;
 mod server;
 mod views;
 
@@ -19,6 +20,8 @@ enum Route {
     Blog { id: i32 },
     #[route("/download")]
     Download {},
+    #[route("/downloads")]
+    Downloads {},
     #[route("/getinfo")]
     GetInfo {},
 }
@@ -27,14 +30,46 @@ const FAVICON: Asset = asset!("/assets/favicon.ico");
 const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
+#[cfg(feature = "server")]
+use database::init_database;
+
 fn main() {
-    dioxus::launch(App);
+    // Print feature flags for debugging
+    println!("Starting application with features:");
+    println!("  server: {}", cfg!(feature = "server"));
+    println!("  desktop: {}", cfg!(feature = "desktop"));
+    println!("  web: {}", cfg!(feature = "web"));
+
+    // Initialize database if server feature is enabled
+    #[cfg(feature = "server")]
+    {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            if let Err(e) = init_database().await {
+                eprintln!("Database initialization error: {}", e);
+                println!("Will continue with in-memory database");
+            }
+        });
+    }
+
+    // Launch the app based on target platform
+    #[cfg(feature = "desktop")]
+    {
+        LaunchBuilder::desktop().launch(App);
+    }
+
+    #[cfg(feature = "web")]
+    {
+        LaunchBuilder::web().launch(App);
+    }
+
+    #[cfg(not(any(feature = "desktop", feature = "web")))]
+    {
+        LaunchBuilder::new().launch(App);
+    }
 }
 
 #[component]
 fn App() -> Element {
-    // Build cool things ✌️
-
     rsx! {
         // Global app resources
         document::Link { rel: "icon", href: FAVICON }

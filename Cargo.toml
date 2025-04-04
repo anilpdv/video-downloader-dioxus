@@ -32,6 +32,18 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
 ], optional = true }
 dirs = "5.0.1"
+sqlx = { version = "0.7.3", features = [
+    "runtime-tokio",
+    "sqlite",
+], optional = true }
+time = { version = "0.3", features = [
+    "formatting",
+    "serde",
+    "parsing",
+], optional = true }
+url = "2.4.1"
+open = "4.2.0"
+chrono = "0.4.26"
 
 [features]
 default = ["server"]
@@ -42,9 +54,15 @@ web = [
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
-desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
-server = ["dioxus/server", "dep:youtube_dl", "dep:tokio"]
+desktop = ["dioxus/desktop", "server"]
+mobile = ["dioxus/mobile", "server"]
+server = [
+    "dioxus/server",
+    "dep:youtube_dl",
+    "dep:tokio",
+    "dep:sqlx",
+    "dep:time",
+]
 
 [profile]
 

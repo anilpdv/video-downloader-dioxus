@@ -1,230 +1,17 @@
 use dioxus::prelude::*;
-
 use serde_json;
 use server_fn::error::NoCustomError;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-#[cfg(feature = "server")]
 use tokio::fs;
+use tokio::runtime::Runtime;
 use tracing;
+
+#[cfg(feature = "server")]
+use crate::database::{get_database, models::Download as DbDownload, schema::save_download};
+use crate::server::download::{storage, types::DownloadProgress, utils, ytdlp};
+
 #[cfg(feature = "server")]
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
-
-/// Structure to track download progress
-#[cfg(feature = "server")]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct DownloadProgress {
-    downloaded_bytes: u64,
-    total_bytes: u64,
-    eta_seconds: u64,
-    status: String,
-}
-
-#[cfg(feature = "server")]
-impl Default for DownloadProgress {
-    fn default() -> Self {
-        Self {
-            downloaded_bytes: 0,
-            total_bytes: 0,
-            eta_seconds: 0,
-            status: "Initializing...".to_string(),
-        }
-    }
-}
-
-/// Check if yt-dlp is installed and download it if not found
-#[cfg(feature = "server")]
-async fn ensure_yt_dlp_available() -> Result<PathBuf, ServerFnError<NoCustomError>> {
-    let app_data_dir = get_app_data_dir()?;
-    let bin_dir = app_data_dir.join("bin");
-
-    // Create the bin directory if it doesn't exist
-    std::fs::create_dir_all(&bin_dir).map_err(|e| {
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Failed to create bin directory: {}",
-            e
-        ))
-    })?;
-
-    // Path to the yt-dlp executable in our bin directory
-    let yt_dlp_path = bin_dir.join(get_yt_dlp_binary_name());
-
-    // Check if we already have yt-dlp in our bin directory
-    if yt_dlp_path.exists() {
-        // Verify it works
-        let check = Command::new(&yt_dlp_path).arg("--version").output();
-        if let Ok(output) = check {
-            if output.status.success() {
-                let version = String::from_utf8_lossy(&output.stdout);
-                tracing::info!("Found bundled yt-dlp: {}", version.trim());
-                return Ok(yt_dlp_path);
-            }
-        }
-
-        // If we reach here, the existing binary doesn't work, so we'll remove it
-        let _ = std::fs::remove_file(&yt_dlp_path);
-    }
-
-    tracing::info!("Bundled yt-dlp not found or not working, extracting...");
-
-    // Extract or download yt-dlp
-    #[cfg(feature = "desktop")]
-    {
-        // For desktop, extract the bundled binary
-        extract_bundled_yt_dlp(&bin_dir)?;
-
-        // Make it executable on Unix-like systems
-        #[cfg(not(target_os = "windows"))]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&yt_dlp_path)?.permissions();
-            perms.set_mode(0o755); // rwx r-x r-x
-            std::fs::set_permissions(&yt_dlp_path, perms).map_err(|e| {
-                ServerFnError::<NoCustomError>::ServerError(format!(
-                    "Failed to set executable permissions: {}",
-                    e
-                ))
-            })?;
-        }
-    }
-
-    // For non-desktop or as fallback, download yt-dlp
-    if !yt_dlp_path.exists() {
-        match youtube_dl::download_yt_dlp(&bin_dir).await {
-            Ok(path) => {
-                tracing::info!("Downloaded yt-dlp to {:?}", path);
-                // Verify it works
-                let downloaded_check = Command::new(&path).arg("--version").output();
-
-                match downloaded_check {
-                    Ok(output) if output.status.success() => {
-                        tracing::info!("Downloaded yt-dlp is working");
-                        return Ok(path);
-                    }
-                    _ => {
-                        tracing::error!("Downloaded yt-dlp failed verification");
-                        return Err(ServerFnError::<NoCustomError>::ServerError(
-                            "Downloaded yt-dlp failed verification. Make sure it has executable permissions.".to_string(),
-                        ));
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to download yt-dlp: {}", e);
-                return Err(ServerFnError::<NoCustomError>::ServerError(format!(
-                    "Failed to download yt-dlp: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    // Final check to make sure we have a working binary
-    let final_check = Command::new(&yt_dlp_path).arg("--version").output();
-    match final_check {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            tracing::info!("Bundled yt-dlp ready: {}", version.trim());
-            Ok(yt_dlp_path)
-        }
-        _ => Err(ServerFnError::<NoCustomError>::ServerError(
-            "Failed to get a working yt-dlp binary".to_string(),
-        )),
-    }
-}
-
-/// Get the appropriate app data directory for storing our bundled binaries
-#[cfg(feature = "server")]
-fn get_app_data_dir() -> Result<PathBuf, ServerFnError<NoCustomError>> {
-    // Use dirs crate to get platform-specific app data directory
-    let base_dir = dirs::data_local_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .ok_or_else(|| {
-            ServerFnError::<NoCustomError>::ServerError(
-                "Could not determine app data directory".to_string(),
-            )
-        })?;
-
-    // Create our app's directory
-    let app_dir = base_dir.join("youtube_downloader");
-    std::fs::create_dir_all(&app_dir).map_err(|e| {
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Failed to create app data directory: {}",
-            e
-        ))
-    })?;
-
-    Ok(app_dir)
-}
-
-/// Get platform-specific yt-dlp binary name
-#[cfg(feature = "server")]
-fn get_yt_dlp_binary_name() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        "yt-dlp.exe".to_string()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        "yt-dlp".to_string()
-    }
-}
-
-/// Extract bundled yt-dlp binary for desktop builds
-#[cfg(all(feature = "server", feature = "desktop"))]
-fn extract_bundled_yt_dlp(bin_dir: &PathBuf) -> Result<(), ServerFnError<NoCustomError>> {
-    // Path to the bundled binary (embedded in the executable at compile time)
-    // We'll use different binaries for different platforms
-    let binary_data = {
-        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        {
-            include_bytes!("../../resources/yt-dlp-windows-x64.exe")
-        }
-        #[cfg(all(target_os = "windows", not(target_arch = "x86_64")))]
-        {
-            include_bytes!("../../resources/yt-dlp-windows-x86.exe")
-        }
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        {
-            include_bytes!("../../resources/yt-dlp-macos-x64")
-        }
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            include_bytes!("../../resources/yt-dlp-macos-arm64")
-        }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            include_bytes!("../../resources/yt-dlp-linux-x64")
-        }
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        {
-            include_bytes!("../../resources/yt-dlp-linux-arm64")
-        }
-        #[cfg(not(any(
-            all(target_os = "windows", target_arch = "x86_64"),
-            all(target_os = "windows", not(target_arch = "x86_64")),
-            all(target_os = "macos", target_arch = "x86_64"),
-            all(target_os = "macos", target_arch = "aarch64"),
-            all(target_os = "linux", target_arch = "x86_64"),
-            all(target_os = "linux", target_arch = "aarch64")
-        )))]
-        {
-            return Err(ServerFnError::<NoCustomError>::ServerError(
-                "No bundled yt-dlp for this platform".to_string(),
-            ));
-        }
-    };
-
-    // Write the binary to disk
-    let target_path = bin_dir.join(get_yt_dlp_binary_name());
-    std::fs::write(&target_path, binary_data).map_err(|e| {
-        ServerFnError::<NoCustomError>::ServerError(format!("Failed to write yt-dlp binary: {}", e))
-    })?;
-
-    tracing::info!("Extracted bundled yt-dlp to {:?}", target_path);
-    Ok(())
-}
 
 #[server(Echo)]
 pub async fn echo(input: String) -> Result<String, ServerFnError<NoCustomError>> {
@@ -276,7 +63,7 @@ pub async fn get_download_progress(
 }
 
 /// Download video with highest quality
-#[server(Download)]
+#[server(DownloadVideo)]
 pub async fn download_video(url: String) -> Result<Vec<u8>, ServerFnError<NoCustomError>> {
     download_with_quality(url, "video".to_string(), "highest".to_string()).await
 }
@@ -367,101 +154,6 @@ pub async fn search_youtube(query: String) -> Result<String, ServerFnError<NoCus
     Err(ServerFnError::<NoCustomError>::ServerError(
         "Server feature not enabled".to_string(),
     ))
-}
-
-#[cfg(feature = "server")]
-fn parse_progress_line(line: &str) -> Option<DownloadProgress> {
-    let mut progress = DownloadProgress::default();
-
-    // Check if the line contains progress information
-    if line.starts_with("[download]") && line.contains("%") {
-        // Parse percentage
-        if let Some(percent_idx) = line.find('%') {
-            if let Some(percent_start) = line[..percent_idx].rfind(' ') {
-                if let Ok(percent) = line[percent_start + 1..percent_idx].trim().parse::<f64>() {
-                    progress.status = format!("Downloading: {:.1}%", percent);
-
-                    // Try to parse the file size
-                    if let Some(of_idx) = line.find(" of ") {
-                        if let Some(size_end) = line[of_idx + 4..].find(' ') {
-                            let size_str = line[of_idx + 4..of_idx + 4 + size_end].trim();
-                            progress.total_bytes = parse_size(size_str).unwrap_or(0);
-                            progress.downloaded_bytes =
-                                ((percent / 100.0) * progress.total_bytes as f64) as u64;
-                        }
-                    }
-
-                    // Try to parse ETA
-                    if let Some(eta_idx) = line.find(" ETA ") {
-                        let eta_str = line[eta_idx + 5..].trim();
-                        progress.eta_seconds = parse_eta(eta_str).unwrap_or(0);
-                    }
-
-                    return Some(progress);
-                }
-            }
-        }
-    } else if line.contains("Merger") || line.contains("ffmpeg") {
-        progress.status = "Processing video...".to_string();
-        progress.downloaded_bytes = progress.total_bytes; // Assume download is complete
-        return Some(progress);
-    }
-
-    None
-}
-
-#[cfg(feature = "server")]
-fn parse_size(size_str: &str) -> Option<u64> {
-    let mut num_str = String::new();
-    let mut unit_str = String::new();
-
-    for c in size_str.chars() {
-        if c.is_digit(10) || c == '.' {
-            num_str.push(c);
-        } else if c.is_alphabetic() {
-            unit_str.push(c);
-        }
-    }
-
-    match num_str.parse::<f64>() {
-        Ok(num) => match unit_str.to_uppercase().as_str() {
-            "B" => Some(num as u64),
-            "KB" | "KIB" => Some((num * 1024.0) as u64),
-            "MB" | "MIB" => Some((num * 1024.0 * 1024.0) as u64),
-            "GB" | "GIB" => Some((num * 1024.0 * 1024.0 * 1024.0) as u64),
-            _ => None,
-        },
-        Err(_) => None,
-    }
-}
-
-#[cfg(feature = "server")]
-fn parse_eta(eta_str: &str) -> Option<u64> {
-    let parts: Vec<&str> = eta_str.split(':').collect();
-
-    match parts.len() {
-        2 => {
-            // MM:SS format
-            match (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
-                (Ok(minutes), Ok(seconds)) => Some(minutes * 60 + seconds),
-                _ => None,
-            }
-        }
-        3 => {
-            // HH:MM:SS format
-            match (
-                parts[0].parse::<u64>(),
-                parts[1].parse::<u64>(),
-                parts[2].parse::<u64>(),
-            ) {
-                (Ok(hours), Ok(minutes), Ok(seconds)) => {
-                    Some(hours * 3600 + minutes * 60 + seconds)
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 /// Download with specific format_type and quality
@@ -753,7 +445,7 @@ pub async fn download_with_quality(
 
         // Find the downloaded file
         tracing::info!("Looking for downloaded file in {:?}", temp_dir);
-        let downloaded_file = find_downloaded_file(&temp_dir).await.map_err(|e| {
+        let downloaded_file = utils::find_downloaded_file(&temp_dir).await.map_err(|e| {
             ServerFnError::<NoCustomError>::ServerError(format!(
                 "Failed to find downloaded file: {}",
                 e
@@ -780,12 +472,80 @@ pub async fn download_with_quality(
             ))
         })?;
 
-        // Clean up the temp directory
-        tracing::info!("Cleaning up temporary directory");
-        let _ = fs::remove_dir_all(&temp_dir).await;
+        // Create a permanent path for database record
+        let mut file_path_for_db = downloaded_file.to_string_lossy().to_string();
 
-        // Clean up progress file
+        // Save to a permanent location with proper permissions
+        let extension = downloaded_file
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let file_name = storage::create_clean_filename(&video_title, &extension);
+        let mut saved_to_permanent = false;
+
+        // For desktop apps, save in Documents folder next to database
+        #[cfg(feature = "desktop")]
+        {
+            if let Some(media_dir) = storage::ensure_media_directory() {
+                let permanent_path = media_dir.join(&file_name);
+
+                // Try to save the file with proper permissions
+                if storage::save_file_with_permissions(&permanent_path, &content) {
+                    tracing::info!("Media file saved to: {}", permanent_path.display());
+                    file_path_for_db = permanent_path.to_string_lossy().to_string();
+                    saved_to_permanent = true;
+                }
+            }
+        }
+
+        // Also save to Downloads folder for convenience
+        if let Some(download_dir) = dirs::download_dir() {
+            let download_path = download_dir.join(&file_name);
+            if storage::save_file_with_permissions(&download_path, &content) {
+                tracing::info!(
+                    "Copy saved to Downloads folder: {}",
+                    download_path.display()
+                );
+                if !saved_to_permanent {
+                    file_path_for_db = download_path.to_string_lossy().to_string();
+                    saved_to_permanent = true;
+                }
+            }
+        }
+
+        // Always clean up temporary files
+        tracing::info!("Cleaning up temporary files");
+        let _ = fs::remove_dir_all(&temp_dir).await;
         let _ = fs::remove_file(&progress_file).await;
+
+        // Get file size
+        let file_size = content.len() as i64;
+
+        // Save download info to database
+        #[cfg(feature = "server")]
+        {
+            if let Err(e) = save_download_info(
+                &url,
+                &video_title,
+                &file_name,
+                &file_path_for_db,
+                &if format_type.is_empty() {
+                    "video".to_string()
+                } else {
+                    format_type.clone()
+                },
+                &if quality.is_empty() {
+                    "best".to_string()
+                } else {
+                    quality.clone()
+                },
+                file_size,
+            )
+            .await
+            {
+                tracing::error!("Database error: {}", e);
+            }
+        }
 
         tracing::info!("Downloaded {} bytes successfully", content.len());
         Ok(content)
@@ -798,60 +558,166 @@ pub async fn download_with_quality(
 }
 
 #[cfg(feature = "server")]
-async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
-    let dir_path = dir.as_ref();
-    let mut entries = fs::read_dir(dir_path).await?;
+pub async fn download_video_with_progress(
+    url: String,
+    format: Option<String>,
+    quality: Option<String>,
+    path: Option<String>,
+    set_progress: impl Fn(f32, Option<String>, Option<String>) + Clone + Send + 'static,
+) -> Result<String, String> {
+    // First fetch video information
+    let video_info = get_video_info(url.clone())
+        .await
+        .map_err(|e| format!("Error fetching video info: {}", e))?;
 
-    tracing::info!(
-        "Scanning directory {} for downloaded files",
-        dir_path.display()
-    );
+    // Parse the JSON to get title and other metadata
+    let video_data: serde_json::Value = serde_json::from_str(&video_info)
+        .map_err(|e| format!("Error parsing video info: {}", e))?;
 
-    // First try to find any media file
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        tracing::info!("Found file: {:?}", path);
+    let title = video_data
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown_title")
+        .to_string();
 
-        if path.is_file() {
-            // Check the file extension for media types
-            if let Some(ext) = path.extension() {
-                let ext_str = ext.to_string_lossy().to_lowercase();
-                // Add more audio formats to the list
-                if [
-                    "mp4", "mp3", "m4a", "webm", "mkv", "opus", "ogg", "wav", "aac", "flac",
-                ]
-                .contains(&ext_str.as_str())
-                {
-                    // Get file size for logging
-                    if let Ok(metadata) = fs::metadata(&path).await {
-                        tracing::info!(
-                            "Found media file: {} ({} bytes)",
-                            path.file_name().unwrap_or_default().to_string_lossy(),
-                            metadata.len()
-                        );
+    // Download the video - this returns Vec<u8>
+    let result = download_with_quality(
+        url.clone(),
+        format.clone().unwrap_or_else(|| "video".to_string()),
+        quality.clone().unwrap_or_else(|| "highest".to_string()),
+    )
+    .await;
+
+    match result {
+        Ok(content) => {
+            // For database, we need to save some metadata
+            // Since we have the content as Vec<u8>, we need to save it to a file first
+            let temp_file = std::env::temp_dir().join(format!(
+                "{}_{}.mp4",
+                title.replace(" ", "_"),
+                chrono::Utc::now().timestamp()
+            ));
+
+            let file_path = temp_file.to_string_lossy().to_string();
+            let filename = temp_file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            // Create a permanent path for database record
+            let mut file_path_for_db = file_path.clone();
+
+            // Save to a permanent location with proper permissions
+            let file_name = storage::create_clean_filename(&title, "mp4");
+            let mut saved_to_permanent = false;
+
+            // For desktop apps, save in Documents folder next to database
+            #[cfg(feature = "desktop")]
+            {
+                if let Some(media_dir) = storage::ensure_media_directory() {
+                    let permanent_path = media_dir.join(&file_name);
+
+                    // Try to save the file with proper permissions
+                    if storage::save_file_with_permissions(&permanent_path, &content) {
+                        tracing::info!("Media file saved to: {}", permanent_path.display());
+                        file_path_for_db = permanent_path.to_string_lossy().to_string();
+                        saved_to_permanent = true;
                     }
-                    return Ok(path);
                 }
             }
+
+            // Also save to Downloads folder for convenience
+            if let Some(download_dir) = dirs::download_dir() {
+                let download_path = download_dir.join(&file_name);
+                if storage::save_file_with_permissions(&download_path, &content) {
+                    tracing::info!(
+                        "Copy saved to Downloads folder: {}",
+                        download_path.display()
+                    );
+                    if !saved_to_permanent {
+                        file_path_for_db = download_path.to_string_lossy().to_string();
+                        saved_to_permanent = true;
+                    }
+                }
+            }
+
+            // Always clean up temporary files
+            tracing::info!("Cleaning up temporary files");
+            // No need to clean up as we just save the file directly to final locations
+
+            tracing::info!("Downloaded {} bytes successfully", content.len());
+
+            // Get file size
+            let file_size = content.len() as i64;
+
+            // Save download info to database
+            #[cfg(feature = "server")]
+            {
+                if let Err(e) = save_download_info(
+                    &url,
+                    &title,
+                    &filename,
+                    &file_path_for_db,
+                    &format.clone().unwrap_or_else(|| "video".to_string()),
+                    &quality.clone().unwrap_or_else(|| "best".to_string()),
+                    file_size,
+                )
+                .await
+                {
+                    tracing::error!("Database error: {}", e);
+                }
+            }
+
+            Ok(file_path)
+        }
+        Err(e) => Err(format!("Download error: {}", e)),
+    }
+}
+
+/// Save download info to database
+#[cfg(feature = "server")]
+async fn save_download_info(
+    url: &str,
+    title: &str,
+    filename: &str,
+    file_path: &str,
+    format_type: &str,
+    quality: &str,
+    file_size: i64,
+) -> Result<(), ServerFnError<NoCustomError>> {
+    let video_id = DbDownload::extract_video_id(url);
+
+    // Generate thumbnail URL if video ID is available
+    let thumbnail_url = video_id
+        .as_ref()
+        .map(|id| DbDownload::generate_thumbnail_url(id));
+
+    // Set initial values for the download record
+    let download = DbDownload::new(
+        url.to_string(),
+        Some(title.to_string()),
+        filename.to_string(),
+        file_path.to_string(),
+        format_type.to_string(),
+        quality.to_string(),
+        Some(file_size),
+        thumbnail_url,
+        video_id,
+        None, // Duration not available
+    );
+
+    // Try to save to database
+    if let Ok(pool) = get_database().await {
+        if let Err(e) = save_download(&pool, &download).await {
+            tracing::error!("Failed to save download history: {}", e);
+            return Err(ServerFnError::<NoCustomError>::ServerError(format!(
+                "Failed to save download history: {}",
+                e
+            )));
+        } else {
+            tracing::info!("Saved download history for: {}", title);
         }
     }
-
-    // Try again to find ANY file if we didn't find a media file
-    let mut entries = fs::read_dir(dir_path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file() {
-            tracing::info!(
-                "Falling back to non-media file: {}",
-                path.file_name().unwrap_or_default().to_string_lossy(),
-            );
-            return Ok(path);
-        }
-    }
-
-    tracing::error!("No files found in directory: {}", dir_path.display());
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "No downloaded file found",
-    ))
+    Ok(())
 }

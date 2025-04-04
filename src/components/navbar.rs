@@ -12,6 +12,7 @@ pub fn Navbar() -> Element {
             Link { to: Route::Home {}, "Home" }
             Link { to: Route::Blog { id: 1 }, "Blog" }
             Link { to: Route::Download {}, "Download" }
+            Link { to: Route::Downloads {}, "My Downloads" }
             Link { to: Route::GetInfo {}, "Get Info" }
         }
         Outlet::<Route> {}
