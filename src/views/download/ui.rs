@@ -2,10 +2,12 @@ use crate::views::download::handlers::{execute_download, update_filename};
 use crate::views::download::platforms::trigger_download;
 use crate::views::download::types::{FormatType, Quality};
 use dioxus::prelude::*;
+use dioxus_free_icons::{icons::fa_solid_icons::FaDownload, Icon};
 
 #[cfg(feature = "desktop")]
 use crate::views::download::platforms::save_to_disk;
 
+// Download Component
 #[component]
 pub fn Download() -> Element {
     // Form state
@@ -50,6 +52,9 @@ pub fn Download() -> Element {
         }
     };
 
+    // Handle URL validation
+    let is_url_valid = !url().is_empty();
+
     // Handle the download button click
     let handle_download = move |_| {
         // Validate inputs
@@ -93,140 +98,66 @@ pub fn Download() -> Element {
         );
     };
 
-    // Define CSS classes based on selected options
-    let format_video_class = match format_type() {
-        FormatType::Video => {
-            "flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded"
+    let get_button_class = move || {
+        if loading() {
+            "w-full text-text-invert bg-accent-teal cursor-not-allowed font-medium rounded-lg text-sm px-5 py-3 text-center shadow-sm"
+        } else if !is_url_valid {
+            "w-full text-text-muted bg-background-medium cursor-not-allowed rounded-lg text-sm px-5 py-3 text-center border border-border"
+        } else if download_ready() {
+            "w-full text-text-invert bg-accent-green hover:bg-opacity-80 font-medium rounded-lg text-sm px-5 py-3 text-center transition-colors shadow-sm"
+        } else {
+            "w-full text-text-invert bg-accent-teal hover:bg-opacity-80 font-medium rounded-lg text-sm px-5 py-3 text-center transition-colors shadow-sm"
         }
-        _ => "flex-1 bg-gray-700 hover:bg-red-600 text-white font-bold py-3 px-6 rounded",
     };
 
-    let format_audio_class = match format_type() {
-        FormatType::Audio => {
-            "flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded"
-        }
-        _ => "flex-1 bg-gray-700 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded",
-    };
-
-    let quality_highest_class = match quality() {
-        Quality::Highest => "flex-1 bg-red-600 text-white py-2 px-4 rounded",
-        _ => "flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded",
-    };
-
-    let quality_medium_class = match quality() {
-        Quality::Medium => "flex-1 bg-red-600 text-white py-2 px-4 rounded",
-        _ => "flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded",
-    };
-
-    let quality_lowest_class = match quality() {
-        Quality::Lowest => "flex-1 bg-red-600 text-white py-2 px-4 rounded",
-        _ => "flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded",
-    };
-
-    let download_button_class = "bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded w-full disabled:opacity-50 disabled:cursor-not-allowed";
-    let button_text = if loading() {
-        "Processing..."
-    } else {
-        "Download"
-    };
-
-    // Progress bar component
-    let progress_component = if loading() && progress_percent() > 0 {
-        let eta_section = if !progress_eta().is_empty() {
+    let render_button_content = move || {
+        if loading() {
             rsx! {
-                div { class: "mt-1 text-sm text-gray-400 flex justify-between",
-                    span { "Estimated time: {progress_eta()}" }
+                span { class: "flex items-center justify-center",
+                    // Spinner
+                    svg {
+                        class: "animate-spin -ml-1 mr-3 h-5 w-5 text-text-invert",
+                        xmlns: "http://www.w3.org/2000/svg",
+                        fill: "none",
+                        view_box: "0 0 24 24",
+                        circle {
+                            class: "opacity-25",
+                            cx: "12",
+                            cy: "12",
+                            r: "10",
+                            stroke: "currentColor",
+                            stroke_width: "4",
+                        }
+                        path {
+                            class: "opacity-75",
+                            fill: "currentColor",
+                            d: "M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z",
+                        }
+                    }
+                    "Processing..."
                 }
+            }
+        } else if download_ready() {
+            rsx! {
+                span { "Download Ready" }
             }
         } else {
-            rsx! {}
-        };
-
-        // Get status message for display
-        let status_text = match status() {
-            Some(stat) => {
-                // If status contains "Downloading", make sure we show the percentage
-                if stat.contains("Downloading") {
-                    format!("{}", stat)
-                } else {
-                    // Otherwise just show the status message
-                    stat
-                }
-            }
-            None => "Downloading...".to_string(),
-        };
-
-        rsx! {
-            div { class: "mt-4",
-                div { class: "mb-2 flex justify-between",
-                    span { class: "text-gray-300", "{status_text}" }
-                    span { class: "text-gray-300", "{progress_percent()}%" }
-                }
-                div { class: "w-full bg-gray-700 rounded-full h-2.5",
-                    div {
-                        class: "bg-blue-600 h-2.5 rounded-full transition-all duration-1000 ease-in-out",
-                        style: "width: {progress_percent()}%",
+            rsx! {
+                span { class: "flex items-center justify-center",
+                    Icon {
+                        icon: FaDownload,
+                        width: 16,
+                        height: 16,
+                        class: "mr-2",
                     }
-                }
-                {eta_section}
-            }
-        }
-    } else {
-        rsx! {}
-    };
-
-    // Quality selection component - only shown for video format
-    let quality_selection = if matches!(format_type(), FormatType::Video) {
-        rsx! {
-            div { class: "mb-6",
-                label { class: "block text-gray-300 mb-2", "Video Quality" }
-                div { class: "flex gap-3",
-                    button {
-                        class: "{quality_highest_class}",
-                        onclick: move |_| quality.set(Quality::Highest),
-                        "Highest"
-                    }
-                    button {
-                        class: "{quality_medium_class}",
-                        onclick: move |_| quality.set(Quality::Medium),
-                        "Medium"
-                    }
-                    button {
-                        class: "{quality_lowest_class}",
-                        onclick: move |_| quality.set(Quality::Lowest),
-                        "Lowest"
-                    }
+                    "Download Now"
                 }
             }
         }
-    } else {
-        rsx! {}
     };
 
-    // Error message component
-    let error_message = if let Some(err) = error() {
-        rsx! {
-            div { class: "mt-4 bg-red-800 text-white p-3 rounded",
-                p { "{err}" }
-            }
-        }
-    } else {
-        rsx! {}
-    };
-
-    // Status message component
-    let status_message = if let Some(stat) = status() {
-        rsx! {
-            div { class: "mt-4 bg-blue-900 text-white p-3 rounded",
-                p { "{stat}" }
-            }
-        }
-    } else {
-        rsx! {}
-    };
-
-    // Download ready component - shown when download is complete
-    let download_ready_component = if download_ready() {
+    // Define download content
+    let download_content = if download_ready() {
         // Get the extension and update filename if needed
         let extension = format_type().get_extension();
         let download_filename = if filename().ends_with(extension) {
@@ -266,151 +197,213 @@ pub fn Download() -> Element {
             }
         };
 
-        // Generate the preview section based on platform
-        let preview_section = if cfg!(feature = "web") {
-            match format_type() {
-                FormatType::Video => {
-                    if let Some(url) = blob_url() {
-                        rsx! {
-                            div { class: "mt-4 pt-4 border-t border-green-700",
-                                p { class: "text-gray-300 mb-2", "Preview:" }
-                                video {
-                                    class: "w-full max-h-96 rounded",
-                                    controls: true,
-                                    src: "{url}",
-                                }
-                            }
-                        }
-                    } else {
-                        rsx! {
-                            div { "Loading preview..." }
-                        }
-                    }
-                }
-                FormatType::Audio => {
-                    if let Some(url) = blob_url() {
-                        rsx! {
-                            div { class: "mt-4 pt-4 border-t border-green-700",
-                                p { class: "text-gray-300 mb-2", "Preview:" }
-                                audio {
-                                    class: "w-full",
-                                    controls: true,
-                                    src: "{url}",
-                                }
-                            }
-                        }
-                    } else {
-                        rsx! {
-                            div { "Loading preview..." }
-                        }
-                    }
-                }
-            }
-        } else if cfg!(feature = "desktop") {
-            // Desktop specific message
-            rsx! {
-                div { class: "mt-4 pt-4 border-t border-green-700 text-gray-300",
-                    p { "Click the button above to choose where to save your file." }
-                }
-            }
-        } else {
-            rsx! {}
-        };
-
         rsx! {
-            div { class: "mt-6 p-6 bg-green-900 bg-opacity-20 rounded-lg border border-green-700",
-                p { class: "text-green-400 font-medium mb-4", "✓ Your file is ready to download!" }
+            div { class: "mt-6 p-6 bg-background-card rounded-lg border border-accent-green",
+                p { class: "text-accent-green font-medium mb-4",
+                    "✓ Your file is ready to download!"
+                }
 
                 // Separate components for the two format types
                 match format_type() {
                     FormatType::Video => rsx! {
-                        p { class: "text-gray-300 mb-4",
+                        p { class: "text-text-secondary mb-4",
                             "File format: "
-                            span { class: "font-bold text-red-400", "Video (MP4)" }
+                            span { class: "font-bold text-accent-teal", "Video (MP4)" }
                         }
                     },
                     FormatType::Audio => rsx! {
-                        p { class: "text-gray-300 mb-4",
+                        p { class: "text-text-secondary mb-4",
                             "File format: "
-                            span { class: "font-bold text-blue-400", "Audio (MP3)" }
+                            span { class: "font-bold text-accent-amber", "Audio (MP3)" }
                         }
                     },
                 }
 
                 div { class: "text-center",
                     button {
-                        class: "inline-block w-full sm:w-auto px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium text-white transition-colors duration-200",
+                        class: "inline-block w-full sm:w-auto px-6 py-3 bg-accent-green bg-opacity-80 hover:bg-opacity-100 rounded-lg font-medium text-text-primary transition-colors duration-200 shadow-sm",
                         onclick: download_handler,
                         "{save_button_text}"
                     }
                 }
-
-                // Include the preview section
-                {preview_section}
             }
         }
     } else {
         rsx! {}
     };
 
-    // Main component UI
-    rsx! {
-        div { class: "min-h-screen bg-gray-900 text-white",
-            div { class: "container mx-auto px-4 py-8",
-                div { class: "text-center mb-10",
-                    h1 { class: "text-4xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent",
-                        "YouTube Downloader"
+    // Progress bar component
+    let progress_component = if loading() && progress_percent() > 0 {
+        let eta_section = if !progress_eta().is_empty() {
+            rsx! {
+                div { class: "mt-1 text-sm text-text-muted flex justify-between",
+                    span { "Estimated time: {progress_eta()}" }
+                }
+            }
+        } else {
+            rsx! {}
+        };
+
+        // Get status message for display
+        let status_text = match status() {
+            Some(stat) => {
+                // If status contains "Downloading", make sure we show the percentage
+                if stat.contains("Downloading") {
+                    format!("{}", stat)
+                } else {
+                    // Otherwise just show the status message
+                    stat
+                }
+            }
+            None => "Downloading...".to_string(),
+        };
+
+        rsx! {
+            div { class: "mt-4",
+                div { class: "mb-2 flex justify-between",
+                    span { class: "text-text-secondary", "{status_text}" }
+                    span { class: "text-text-secondary", "{progress_percent()}%" }
+                }
+                div { class: "w-full bg-background-medium rounded-full h-2.5",
+                    div {
+                        class: "bg-accent-teal h-2.5 rounded-full transition-all duration-1000 ease-in-out",
+                        style: "width: {progress_percent()}%",
                     }
-                    p { class: "text-gray-400 mt-2", "Download videos and audio from YouTube" }
+                }
+                {eta_section}
+            }
+        }
+    } else {
+        rsx! {}
+    };
+
+    // Error message component
+    let error_message = if let Some(err) = error() {
+        rsx! {
+            div { class: "mt-4 bg-accent-rose bg-opacity-10 text-accent-rose p-3 rounded",
+                p { "{err}" }
+            }
+        }
+    } else {
+        rsx! {}
+    };
+
+    // Status message component
+    let status_message = if let Some(stat) = status() {
+        rsx! {
+            div { class: "mt-4 bg-background-card text-text-primary p-3 rounded border border-border",
+                p { "{stat}" }
+            }
+        }
+    } else {
+        rsx! {}
+    };
+
+    // Render main component
+    rsx! {
+        div { class: "container mx-auto px-4 py-8",
+            div { class: "max-w-3xl mx-auto",
+                h1 { class: "text-3xl font-bold mb-4 text-text-primary", "Download Video & Audio" }
+                p { class: "mb-8 text-text-secondary",
+                    "Enter a URL to download videos or audio from various platforms."
                 }
 
-                div { class: "max-w-2xl mx-auto bg-gray-800 p-6 rounded-lg shadow-lg",
+                // Download form
+                div { class: "bg-background-card rounded-xl shadow-md p-6 border border-border",
                     // Format Selection Buttons
                     div { class: "mb-6",
-                        label { class: "block text-gray-300 mb-2", "Download Format" }
-                        div { class: "flex gap-4",
+                        label { class: "block mb-2 text-sm font-medium text-text-primary",
+                            "Download Format"
+                        }
+                        div { class: "grid grid-cols-2 gap-2",
+                            // Audio option
                             button {
-                                class: "{format_video_class}",
-                                onclick: move |_| handle_format_change(FormatType::Video),
-                                "🎬 Video (MP4)"
-                            }
-                            button {
-                                class: "{format_audio_class}",
+                                key: "audio",
+                                class: if format_type() == FormatType::Audio { "bg-accent-amber bg-opacity-20 text-accent-amber border border-accent-amber text-sm rounded-lg px-4 py-2.5 focus:outline-none" } else { "bg-background-medium hover:bg-background-hover text-text-primary border border-border text-sm rounded-lg px-4 py-2.5 focus:outline-none" },
                                 onclick: move |_| handle_format_change(FormatType::Audio),
+                                disabled: loading(),
                                 "🎵 Audio (MP3)"
                             }
+                            // Video option
+                            button {
+                                key: "video",
+                                class: if format_type() == FormatType::Video { "bg-accent-teal bg-opacity-20 text-accent-teal border border-accent-teal text-sm rounded-lg px-4 py-2.5 focus:outline-none" } else { "bg-background-medium hover:bg-background-hover text-text-primary border border-border text-sm rounded-lg px-4 py-2.5 focus:outline-none" },
+                                onclick: move |_| handle_format_change(FormatType::Video),
+                                disabled: loading(),
+                                "🎬 Video (MP4)"
+                            }
                         }
                     }
 
-                    // Quality Selection (only shown for video)
-                    {quality_selection}
-
+                    // Quality selection
                     div { class: "mb-6",
-                        label { class: "block text-gray-300 mb-2", "YouTube URL" }
-                        input {
-                            class: "w-full bg-gray-700 text-white border border-gray-600 rounded py-2 px-3 focus:outline-none focus:border-blue-500",
-                            placeholder: "https://www.youtube.com/watch?v=...",
-                            value: "{url}",
-                            oninput: move |evt| url.set(evt.value().clone()),
+                        label { class: "block mb-2 text-sm font-medium text-text-primary",
+                            if format_type() == FormatType::Audio {
+                                "Audio Quality"
+                            } else {
+                                "Video Quality"
+                            }
+                        }
+                        div { class: "grid grid-cols-3 gap-2",
+                            button {
+                                class: if quality() == Quality::Highest { "bg-accent-teal bg-opacity-20 text-accent-teal border border-accent-teal text-sm rounded-lg px-4 py-2.5 focus:outline-none" } else { "bg-background-medium hover:bg-background-hover text-text-primary border border-border text-sm rounded-lg px-4 py-2.5 focus:outline-none" },
+                                onclick: move |_| quality.set(Quality::Highest),
+                                disabled: loading(),
+                                "High"
+                            }
+                            button {
+                                class: if quality() == Quality::Medium { "bg-accent-teal bg-opacity-20 text-accent-teal border border-accent-teal text-sm rounded-lg px-4 py-2.5 focus:outline-none" } else { "bg-background-medium hover:bg-background-hover text-text-primary border border-border text-sm rounded-lg px-4 py-2.5 focus:outline-none" },
+                                onclick: move |_| quality.set(Quality::Medium),
+                                disabled: loading(),
+                                "Medium"
+                            }
+                            button {
+                                class: if quality() == Quality::Lowest { "bg-accent-teal bg-opacity-20 text-accent-teal border border-accent-teal text-sm rounded-lg px-4 py-2.5 focus:outline-none" } else { "bg-background-medium hover:bg-background-hover text-text-primary border border-border text-sm rounded-lg px-4 py-2.5 focus:outline-none" },
+                                onclick: move |_| quality.set(Quality::Lowest),
+                                disabled: loading(),
+                                "Low"
+                            }
                         }
                     }
 
+                    // URL input group
                     div { class: "mb-6",
-                        label { class: "block text-gray-300 mb-2", "Filename" }
+                        label { class: "block mb-2 text-sm font-medium text-text-primary",
+                            "Video URL"
+                        }
+                        div { class: "flex",
+                            input {
+                                class: "flex-1 bg-background-medium border border-border text-text-primary text-sm rounded-l-lg focus:ring-accent-teal focus:border-accent-teal block w-full p-2.5",
+                                r#type: "text",
+                                placeholder: "Enter video URL (YouTube, Vimeo, etc.)",
+                                value: "{url}",
+                                oninput: move |e| url.set(e.value().clone()),
+                                disabled: loading(),
+                            }
+                            button {
+                                class: "bg-background-medium hover:bg-background-hover text-text-primary border border-l-0 border-border font-medium rounded-r-lg text-sm px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-accent-teal",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    url.set("https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_string());
+                                },
+                                disabled: loading(),
+                                "Paste"
+                            }
+                        }
+                    }
+
+                    // Filename input
+                    div { class: "mb-6",
+                        label { class: "block mb-2 text-sm font-medium text-text-primary",
+                            "Custom filename (optional)"
+                        }
                         input {
-                            class: "w-full bg-gray-700 text-white border border-gray-600 rounded py-2 px-3 focus:outline-none focus:border-blue-500",
-                            placeholder: "Enter filename without extension",
+                            class: "bg-background-medium border border-border text-text-primary text-sm rounded-lg focus:ring-accent-teal focus:border-accent-teal block w-full p-2.5",
+                            r#type: "text",
+                            placeholder: "Enter custom filename (without extension)",
                             value: "{filename}",
-                            oninput: move |evt| filename.set(evt.value().clone()),
-                        }
-                    }
-
-                    div { class: "mb-4",
-                        button {
-                            class: "{download_button_class}",
-                            onclick: handle_download,
+                            oninput: move |e| filename.set(e.value().clone()),
                             disabled: loading(),
-                            "{button_text}"
                         }
                     }
 
@@ -423,18 +416,17 @@ pub fn Download() -> Element {
                     // Status messages
                     {status_message}
 
-                    // Show download button when ready
-                    {download_ready_component}
-                }
+                    // Show download content when ready
+                    {download_content}
 
-                div { class: "max-w-2xl mx-auto mt-8 p-4 bg-gray-800 rounded-lg text-gray-300",
-                    h3 { class: "text-xl font-bold mb-2", "Information" }
-                    ul { class: "list-disc pl-5 space-y-1",
-                        li { "Choose Video (MP4) to download both video and audio." }
-                        li { "Choose Audio (MP3) if you only need the audio track." }
-                        li { "Quality affects the resolution and file size (for video downloads)." }
-                        li { "Some videos may not be available in all quality levels." }
-                        li { "If a download fails, try a different quality or format." }
+                    // Download button
+                    if !download_ready() {
+                        button {
+                            class: get_button_class(),
+                            disabled: loading() || url().is_empty() || filename().is_empty(),
+                            onclick: handle_download,
+                            {render_button_content()}
+                        }
                     }
                 }
             }

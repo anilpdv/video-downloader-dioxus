@@ -10,12 +10,26 @@ use dioxus_free_icons::{
     Icon,
 };
 
+// Helper function to get properly formatted file URL for media playback
+#[cfg(feature = "server")]
+fn get_file_url(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!("file:///{}", path.replace('\\', '/'))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        format!("file://{}", path)
+    }
+}
+
 #[component]
 pub fn Downloads() -> Element {
     rsx! {
         div { class: "container mx-auto py-6 px-4",
-            h1 { class: "text-3xl font-bold mb-4", "My Downloads" }
-            p { class: "mb-6 text-gray-600",
+            h1 { class: "text-3xl font-bold mb-4 text-text-primary", "My Downloads" }
+            p { class: "mb-6 text-text-secondary",
                 "Access and play your downloaded videos and audio files."
             }
             ServerContent {}
@@ -71,7 +85,7 @@ fn ServerContent() -> Element {
         if loading() {
             return rsx! {
                 div { class: "flex flex-col items-center justify-center py-16",
-                    div { class: "animate-spin w-12 h-12 mb-4 text-blue-500",
+                    div { class: "animate-spin w-12 h-12 mb-4 text-text-secondary",
                         svg {
                             xmlns: "http://www.w3.org/2000/svg",
                             class: "h-12 w-12",
@@ -86,7 +100,7 @@ fn ServerContent() -> Element {
                             }
                         }
                     }
-                    p { class: "text-gray-600", "Loading your downloads..." }
+                    p { class: "text-text-muted", "Loading your downloads..." }
                 }
             };
         }
@@ -132,17 +146,17 @@ fn ServerContent() -> Element {
 
         if downloads().is_empty() {
             return rsx! {
-                div { class: "text-center py-16 bg-gray-50 rounded-xl border border-gray-200 shadow-sm",
+                div { class: "text-center py-16 bg-background-card rounded-xl border border-border shadow-md",
                     div { class: "flex justify-center mb-6",
                         Icon {
                             icon: FaDownload,
                             width: 52,
                             height: 52,
-                            class: "text-gray-400",
+                            class: "text-text-muted",
                         }
                     }
-                    p { class: "text-xl font-medium text-gray-700", "No downloads yet" }
-                    p { class: "text-gray-500 mt-2 max-w-md mx-auto",
+                    p { class: "text-xl font-medium text-text-primary", "No downloads yet" }
+                    p { class: "text-text-secondary mt-2 max-w-md mx-auto",
                         "Your downloaded files will appear here. Try downloading a video or audio file from the home page."
                     }
                 }
@@ -159,11 +173,11 @@ fn ServerContent() -> Element {
                             icon: BsSearch,
                             width: 16,
                             height: 16,
-                            class: "text-gray-400",
+                            class: "text-text-muted",
                         }
                     }
                     input {
-                        class: "bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 p-2.5",
+                        class: "bg-background-card border border-border text-text-primary text-sm rounded-lg focus:ring-accent-teal focus:border-accent-teal block w-full pl-10 p-2.5",
                         r#type: "text",
                         placeholder: "Search downloads...",
                         value: "{search_query}",
@@ -172,11 +186,11 @@ fn ServerContent() -> Element {
                 }
             }
             // Tab navigation
-            div { class: "mb-6 border-b border-gray-200",
+            div { class: "mb-6 border-b border-border",
                 div { class: "flex flex-wrap -mb-px",
                     // All tab
                     button {
-                        class: if active_tab() == "all" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-blue-600 border-b-2 border-blue-600 rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-gray-500 border-b-2 border-transparent hover:text-gray-600 hover:border-gray-300 rounded-t-lg" },
+                        class: if active_tab() == "all" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                         onclick: move |_| active_tab.set("all".to_string()),
                         Icon {
                             icon: HiViewGrid,
@@ -189,7 +203,7 @@ fn ServerContent() -> Element {
 
                     // Audio tab
                     button {
-                        class: if active_tab() == "audio" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-blue-600 border-b-2 border-blue-600 rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-gray-500 border-b-2 border-transparent hover:text-gray-600 hover:border-gray-300 rounded-t-lg" },
+                        class: if active_tab() == "audio" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                         onclick: move |_| active_tab.set("audio".to_string()),
                         Icon {
                             icon: HiMusicNote,
@@ -202,7 +216,7 @@ fn ServerContent() -> Element {
 
                     // Video tab
                     button {
-                        class: if active_tab() == "video" { "inline-flex items-center py-3 px-4 text-sm font-medium text-blue-600 border-b-2 border-blue-600 rounded-t-lg" } else { "inline-flex items-center py-3 px-4 text-sm font-medium text-gray-500 border-b-2 border-transparent hover:text-gray-600 hover:border-gray-300 rounded-t-lg" },
+                        class: if active_tab() == "video" { "inline-flex items-center py-3 px-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                         onclick: move |_| active_tab.set("video".to_string()),
                         Icon {
                             icon: HiFilm,
@@ -217,23 +231,23 @@ fn ServerContent() -> Element {
 
             // No files found message when filter is applied
             if filtered_downloads.is_empty() {
-                div { class: "text-center py-12 bg-gray-50 rounded-xl border border-gray-200 shadow-sm",
+                div { class: "text-center py-12 bg-background-card rounded-xl border border-border shadow-md",
                     if !search_query().is_empty() {
                         div { class: "flex flex-col items-center",
                             Icon {
                                 icon: BsSearch,
                                 width: 40,
                                 height: 40,
-                                class: "text-gray-400 mb-4",
+                                class: "text-text-muted mb-4",
                             }
-                            p { class: "text-lg font-medium text-gray-700",
+                            p { class: "text-lg font-medium text-text-primary",
                                 "No results found for \"{search_query()}\""
                             }
-                            p { class: "text-gray-500 mt-2",
+                            p { class: "text-text-secondary mt-2",
                                 "Try different keywords or clear your search"
                             }
                             button {
-                                class: "mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition-colors",
+                                class: "mt-4 px-4 py-2 bg-accent-teal text-text-primary rounded-lg text-sm hover:bg-opacity-80 transition-colors",
                                 onclick: move |_| search_query.set(String::new()),
                                 "Clear Search"
                             }
@@ -245,20 +259,20 @@ fn ServerContent() -> Element {
                                     icon: FaMusic,
                                     width: 40,
                                     height: 40,
-                                    class: "text-gray-400 mb-4",
+                                    class: "text-text-muted mb-4",
                                 }
                             } else {
                                 Icon {
                                     icon: FaVideo,
                                     width: 40,
                                     height: 40,
-                                    class: "text-gray-400 mb-4",
+                                    class: "text-text-muted mb-4",
                                 }
                             }
-                            p { class: "text-lg font-medium text-gray-700",
+                            p { class: "text-lg font-medium text-text-primary",
                                 "No {active_tab()} files found"
                             }
-                            p { class: "text-gray-500 mt-2",
+                            p { class: "text-text-secondary mt-2",
                                 "Try switching to a different category or download some {active_tab()} files."
                             }
                         }
@@ -278,11 +292,11 @@ fn ServerContent() -> Element {
     // Only show "unavailable" message if server feature is not available
     #[cfg(not(feature = "server"))]
     return rsx! {
-        div { class: "text-center py-12 bg-gray-50 rounded-lg",
-            p { class: "text-xl font-medium text-gray-500",
+        div { class: "text-center py-12 bg-background-card rounded-lg border border-border",
+            p { class: "text-xl font-medium text-text-secondary",
                 "Download history is not available in web mode"
             }
-            p { class: "text-gray-400 mt-2",
+            p { class: "text-text-muted mt-2",
                 "For full functionality including download history, please use the desktop app."
             }
         }
@@ -292,15 +306,24 @@ fn ServerContent() -> Element {
 #[cfg(feature = "server")]
 #[component]
 fn DownloadCard(download: Download) -> Element {
-    let file_exists = std::path::Path::new(&download.file_path).exists();
+    // Check if file exists, handling potential URL encoding/decoding issues
+    let file_exists = {
+        let file_path = download.file_path.clone();
+        if std::path::Path::new(&file_path).exists() {
+            true
+        } else {
+            // Try with URL decoded path as a fallback
+            false
+        }
+    };
+
     let is_video = &download.format_type == "video";
     let is_audio = &download.format_type == "audio";
-    let mut show_player = use_signal(|| false);
 
     rsx! {
-        div { class: "bg-white rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-all duration-300 border border-gray-200 transform hover:-translate-y-1",
+        div { class: "bg-background-card rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-all duration-300 border border-border transform hover:-translate-y-1 hover:border-border-light",
             // Thumbnail area
-            div { class: "relative aspect-video bg-gray-200",
+            div { class: "relative aspect-video bg-background-dark",
                 if let Some(ref thumbnail) = download.thumbnail_url {
                     img {
                         class: "w-full h-full object-cover",
@@ -308,27 +331,27 @@ fn DownloadCard(download: Download) -> Element {
                         alt: "Thumbnail",
                     }
                 } else {
-                    div { class: "w-full h-full flex items-center justify-center bg-gradient-to-r from-gray-700 to-gray-900 text-white",
+                    div { class: "w-full h-full flex items-center justify-center bg-gradient-to-r from-background-darker to-background",
                         if is_audio {
                             Icon {
                                 icon: FaMusic,
                                 width: 48,
                                 height: 48,
-                                class: "text-purple-300",
+                                class: "text-accent-amber opacity-50",
                             }
                         } else {
                             Icon {
                                 icon: FaVideo,
                                 width: 48,
                                 height: 48,
-                                class: "text-blue-300",
+                                class: "text-accent-teal opacity-50",
                             }
                         }
                     }
                 }
 
                 // Format badge
-                div { class: if is_audio { "absolute top-2 right-2 bg-purple-500 text-white text-xs px-2 py-1 rounded-full flex items-center" } else { "absolute top-2 right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full flex items-center" },
+                div { class: if is_audio { "absolute top-2 right-2 bg-accent-amber bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" } else { "absolute top-2 right-2 bg-accent-teal bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" },
                     if is_audio {
                         Icon {
                             icon: FaMusic,
@@ -353,60 +376,21 @@ fn DownloadCard(download: Download) -> Element {
 
                 // Duration badge
                 if let Some(_) = download.duration {
-                    div { class: "absolute bottom-2 right-2 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded-full",
+                    div { class: "absolute bottom-2 right-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full",
                         "{download.format_duration()}"
                     }
                 }
 
                 // Quality badge
-                div { class: "absolute bottom-2 left-2 bg-gray-800 bg-opacity-75 text-white text-xs px-2 py-1 rounded-full",
+                div { class: "absolute bottom-2 left-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full",
                     "{download.quality}"
-                }
-
-                // Play overlay button (only if file exists)
-                if file_exists {
-                    button {
-                        class: "absolute inset-0 flex items-center justify-center bg-black bg-opacity-0 hover:bg-opacity-50 transition-opacity duration-300",
-                        onclick: move |_| show_player.set(!show_player()),
-                        div { class: "w-14 h-14 bg-white bg-opacity-90 rounded-full flex items-center justify-center shadow-lg transform hover:scale-110 transition-transform",
-                            // Text-based play icon for simplicity
-                            span { class: "text-red-600 text-xl font-bold",
-                                if show_player() {
-                                    "X"
-                                } else {
-                                    "▶"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Embedded player (shown when play is clicked)
-            if show_player() && file_exists {
-                if is_video {
-                    div { class: "w-full bg-black",
-                        video {
-                            class: "w-full",
-                            controls: true,
-                            src: "file://{download.file_path}",
-                        }
-                    }
-                } else if is_audio {
-                    div { class: "w-full bg-gray-100 p-3 border-t border-b border-gray-200",
-                        audio {
-                            class: "w-full",
-                            controls: true,
-                            src: "file://{download.file_path}",
-                        }
-                    }
                 }
             }
 
             // Details section
             div { class: "p-4",
                 // Title
-                h3 { class: "font-medium text-lg mb-2 line-clamp-2 text-gray-800",
+                h3 { class: "font-medium text-lg mb-2 line-clamp-2 text-text-primary",
                     if let Some(ref title) = download.title {
                         "{title}"
                     } else {
@@ -415,7 +399,7 @@ fn DownloadCard(download: Download) -> Element {
                 }
 
                 // Info row
-                div { class: "flex justify-between text-sm text-gray-500 mb-4",
+                div { class: "flex justify-between text-sm text-text-muted mb-4",
                     div { class: "flex items-center",
                         Icon {
                             icon: FaCalendar,
@@ -441,14 +425,35 @@ fn DownloadCard(download: Download) -> Element {
                     if file_exists {
                         // Play button
                         button {
-                            class: "flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
-                            onclick: move |_| show_player.set(!show_player()),
-                            {if show_player() { "Close Player" } else { "Play Media" }}
+                            class: "flex-1 bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
+                            onclick: {
+                                let file_path = download.file_path.clone();
+                                move |_| {
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        use std::process::Command;
+                                        let _ = Command::new("cmd")
+                                            .args(["/c", "start", "", &file_path])
+                                            .spawn();
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        use std::process::Command;
+                                        let _ = Command::new("open").arg(&file_path).spawn();
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        use std::process::Command;
+                                        let _ = Command::new("xdg-open").arg(&file_path).spawn();
+                                    }
+                                }
+                            },
+                            "Play Media"
                         }
 
                         // Open folder button
                         button {
-                            class: "bg-gray-100 hover:bg-gray-200 text-gray-800 py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
+                            class: "bg-background-medium hover:bg-background-hover text-text-primary py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
                             onclick: {
                                 let file_path = download.file_path.clone();
                                 move |_| {
@@ -478,7 +483,7 @@ fn DownloadCard(download: Download) -> Element {
                             "Open Folder"
                         }
                     } else {
-                        div { class: "flex-1 bg-red-100 text-red-800 py-2 px-3 rounded-lg text-sm text-center flex items-center justify-center",
+                        div { class: "flex-1 bg-accent-rose bg-opacity-20 text-accent-rose py-2 px-3 rounded-lg text-sm text-center flex items-center justify-center",
                             Icon {
                                 icon: BsExclamationTriangleFill,
                                 width: 12,
