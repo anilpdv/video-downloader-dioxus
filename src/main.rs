@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use dioxus::prelude::*;
 
 use components::Navbar;

@@ -3,4 +3,4 @@ disabled = ["inactive-code", "non-snake-case"]
 
 
 [cargo]
-features = ["server"]
+features = ["server", "web", "desktop", "full", "fullstack", "ios", "android"]

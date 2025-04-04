@@ -641,6 +641,10 @@ video {
   display: flex;
 }
 
+.contents {
+  display: contents;
+}
+
 .max-h-96 {
   max-height: 24rem;
 }

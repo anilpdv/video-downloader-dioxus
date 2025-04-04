@@ -1,800 +1,526 @@
-#[cfg(feature = "server")]
-use dioxus::logger::tracing;
 use dioxus::prelude::*;
-#[cfg(feature = "server")]
-use rusty_ytdl::search::YouTube;
-#[cfg(feature = "server")]
-use rusty_ytdl::{FFmpegArgs, Video, VideoFormat, VideoOptions, VideoQuality, VideoSearchOptions};
-#[cfg(feature = "server")]
+
 use serde_json;
+use server_fn::error::NoCustomError;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+#[cfg(feature = "server")]
+use tokio::fs;
+use tracing;
+#[cfg(feature = "server")]
+use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
-#[server(Echo)]
-pub async fn echo(input: String) -> Result<String, ServerFnError> {
-    Ok(input)
-}
+/// Check if yt-dlp is installed and download it if not found
+#[cfg(feature = "server")]
+async fn ensure_yt_dlp_available() -> Result<PathBuf, ServerFnError<NoCustomError>> {
+    tracing::info!("Checking for yt-dlp installation");
 
-#[server(Download)]
-pub async fn download_video(url: String) -> Result<Vec<u8>, ServerFnError> {
-    // Try to download with default options first - this has the highest chance of success
-    let video = match Video::new(&url) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error creating video instance: {}",
-                e
-            )))
-        }
-    };
+    // First check if it's in PATH
+    let yt_dlp_check = Command::new("yt-dlp").arg("--version").output();
 
-    // Get info about available formats
-    let info = match video.get_basic_info().await {
-        Ok(i) => i,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error getting video info: {}",
-                e
-            )))
-        }
-    };
+    match yt_dlp_check {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            tracing::info!("Found yt-dlp in PATH: {}", version.trim());
 
-    // Check if we have any formats available
-    if info.formats.is_empty() {
-        return Err(ServerFnError::ServerError(
-            "No video formats available for this video. It may be restricted or private."
-                .to_string(),
-        ));
-    }
-
-    // Print some debug info about the video
-    tracing::info!("Total formats available: {:?}", info.formats);
-
-    // Find formats with both video and audio
-    let video_with_audio_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| f.has_video && f.has_audio)
-        .collect();
-
-    tracing::info!(
-        "Formats with both video and audio: {}",
-        video_with_audio_formats.len()
-    );
-
-    // Find video-only formats (for debugging)
-    let video_only_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| f.has_video && !f.has_audio)
-        .collect();
-
-    tracing::info!("Video-only formats: {:?}", video_only_formats);
-
-    // Find audio-only formats (for debugging)
-    let audio_only_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| !f.has_video && f.has_audio)
-        .collect();
-
-    tracing::info!("Audio-only formats: {:?}", audio_only_formats);
-
-    // Create video options with explicit settings to ensure we get video+audio
-    let video_options = VideoOptions {
-        quality: VideoQuality::Highest,
-        filter: VideoSearchOptions::VideoAudio, // Explicitly request both video and audio
-        ..Default::default()
-    };
-
-    // Create a video instance with custom options
-    let custom_video = match Video::new_with_options(&url, video_options) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error creating video with options: {}",
-                e
-            )));
-        }
-    };
-
-    // Try to use FFmpeg for better video/audio handling
-    tracing::info!("Attempting to use FFmpeg for video processing");
-
-    // Set up FFmpeg arguments to ensure we get an MP4 with both video and audio
-    let ffmpeg_args = FFmpegArgs {
-        format: Some("mp4".to_string()),
-        audio_filter: None,
-        video_filter: None,
-    };
-
-    // Try to stream with FFmpeg first
-    let stream_result = custom_video.stream_with_ffmpeg(Some(ffmpeg_args)).await;
-
-    match stream_result {
-        Ok(stream) => {
-            println!("Successfully created FFmpeg stream");
-
-            // Collect all chunks into a single buffer
-            let mut buffer = Vec::new();
-            let mut chunk_count = 0;
-
-            // Stream the video data
-            loop {
-                let chunk_result = match stream.chunk().await {
-                    Ok(maybe_chunk) => maybe_chunk,
-                    Err(e) => {
-                        return Err(ServerFnError::ServerError(format!(
-                            "Error downloading chunk: {}",
-                            e
-                        )));
-                    }
-                };
-
-                match chunk_result {
-                    Some(chunk) => {
-                        buffer.extend_from_slice(&chunk);
-                        chunk_count += 1;
-                        if chunk_count % 10 == 0 {
-                            println!(
-                                "Downloaded {} chunks, current size: {} bytes",
-                                chunk_count,
-                                buffer.len()
-                            );
+            // On Unix-like systems, try to find the actual path using "which"
+            #[cfg(not(target_os = "windows"))]
+            {
+                if let Ok(output) = Command::new("which").arg("yt-dlp").output() {
+                    if output.status.success() {
+                        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !path_str.is_empty() {
+                            let actual_path = PathBuf::from(path_str);
+                            tracing::info!("Resolved yt-dlp path: {:?}", actual_path);
+                            return Ok(actual_path);
                         }
                     }
-                    None => break, // End of stream
                 }
             }
 
-            tracing::info!(
-                "Download complete: {} chunks, {} bytes",
-                chunk_count,
-                buffer.len()
-            );
-
-            // Return the complete buffer
-            return Ok(buffer);
+            // Either on Windows or if "which" didn't work, just return the command name
+            return Ok(PathBuf::from("yt-dlp"));
         }
-        Err(e) => {
-            // FFmpeg not available or failed, try fallback method
-            tracing::info!(
-                "FFmpeg stream failed: {}. Falling back to standard stream.",
-                e
-            );
+        Ok(_) | Err(_) => {
+            tracing::warn!("yt-dlp not found in PATH, attempting to download it");
 
-            // Use standard stream as fallback
-            let stream = match custom_video.stream().await {
-                Ok(s) => s,
+            // Try to download yt-dlp to a known location
+            let download_dir = std::env::temp_dir().join("youtube_dl_cache");
+            std::fs::create_dir_all(&download_dir).map_err(|e| {
+                ServerFnError::<NoCustomError>::ServerError(format!(
+                    "Failed to create download dir: {}",
+                    e
+                ))
+            })?;
+
+            match youtube_dl::download_yt_dlp(&download_dir).await {
+                Ok(path) => {
+                    tracing::info!("Downloaded yt-dlp to {:?}", path);
+                    // Verify it works
+                    let downloaded_check = Command::new(&path).arg("--version").output();
+
+                    match downloaded_check {
+                        Ok(output) if output.status.success() => {
+                            tracing::info!("Downloaded yt-dlp is working");
+                            return Ok(path);
+                        }
+                        _ => {
+                            tracing::error!("Downloaded yt-dlp failed verification");
+                            return Err(ServerFnError::<NoCustomError>::ServerError(
+                                "Downloaded yt-dlp failed verification. Make sure it has executable permissions.".to_string(),
+                            ));
+                        }
+                    }
+                }
                 Err(e) => {
-                    return Err(ServerFnError::ServerError(format!(
-                        "Error streaming video: {}",
+                    tracing::error!("Failed to download yt-dlp: {}", e);
+                    return Err(ServerFnError::<NoCustomError>::ServerError(format!(
+                        "Failed to download yt-dlp: {}",
                         e
                     )));
                 }
-            };
-
-            // Collect all chunks into a single buffer
-            let mut buffer = Vec::new();
-            let mut chunk_count = 0;
-
-            // Stream the video data
-            loop {
-                let chunk_result = match stream.chunk().await {
-                    Ok(maybe_chunk) => maybe_chunk,
-                    Err(e) => {
-                        return Err(ServerFnError::ServerError(format!(
-                            "Error downloading chunk: {}",
-                            e
-                        )));
-                    }
-                };
-
-                match chunk_result {
-                    Some(chunk) => {
-                        buffer.extend_from_slice(&chunk);
-                        chunk_count += 1;
-                        if chunk_count % 10 == 0 {
-                            println!(
-                                "Downloaded {} chunks, current size: {} bytes",
-                                chunk_count,
-                                buffer.len()
-                            );
-                        }
-                    }
-                    None => break, // End of stream
-                }
             }
-
-            println!(
-                "Fallback download complete: {} chunks, {} bytes",
-                chunk_count,
-                buffer.len()
-            );
-
-            // Return the complete buffer
-            return Ok(buffer);
         }
     }
 }
 
-// Alternative streaming approach with options
+#[server(Echo)]
+pub async fn echo(input: String) -> Result<String, ServerFnError<NoCustomError>> {
+    Ok(input)
+}
+
+/// Download video with highest quality
+#[server(Download)]
+pub async fn download_video(url: String) -> Result<Vec<u8>, ServerFnError<NoCustomError>> {
+    tracing::info!("Download request for URL: {}", url);
+    download_with_quality(url, "video".to_string(), "highest".to_string()).await
+}
+
+/// Download with specific options
 #[server(DownloadWithOptions)]
 pub async fn download_with_options(
     url: String,
     audio_only: bool,
-) -> Result<Vec<u8>, ServerFnError> {
-    // Set up options based on user preference
-    let video_options = if audio_only {
-        VideoOptions {
-            quality: VideoQuality::Lowest,
-            filter: VideoSearchOptions::Audio,
-            ..Default::default()
-        }
+) -> Result<Vec<u8>, ServerFnError<NoCustomError>> {
+    tracing::info!(
+        "Download options request: URL={}, audio_only={}",
+        url,
+        audio_only
+    );
+    if audio_only {
+        download_with_quality(url, "audio".to_string(), "highest".to_string()).await
     } else {
-        VideoOptions::default()
-    };
+        download_with_quality(url, "video".to_string(), "highest".to_string()).await
+    }
+}
 
-    // Create video instance with options
-    let video = match Video::new_with_options(&url, video_options) {
-        Ok(v) => v,
-        Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-    };
+/// Get video info without downloading
+#[server(GetVideoInfo)]
+pub async fn get_video_info(url: String) -> Result<String, ServerFnError<NoCustomError>> {
+    tracing::info!("Getting video info for: {}", url);
 
-    // Stream the video data
-    let stream = match video.stream().await {
-        Ok(s) => s,
-        Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-    };
-
-    // Collect all chunks into a single buffer
-    let mut buffer = Vec::new();
-
-    // The chunk() method returns a future that resolves to a Result<Option<Bytes>, VideoError>
-    loop {
-        // Get the next chunk as a Result<Option<Bytes>, VideoError>
-        let chunk_result = match stream.chunk().await {
-            Ok(maybe_chunk) => maybe_chunk,
-            Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-        };
-
-        // Check if we have a chunk or reached the end
-        match chunk_result {
-            Some(chunk) => buffer.extend_from_slice(&chunk),
-            None => break, // End of stream
+    // Ensure yt-dlp is available
+    let yt_dlp_path = match ensure_yt_dlp_available().await {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!("Could not find or download yt-dlp: {}", e);
+            return Err(e);
         }
+    };
+
+    let mut youtube_dl = YoutubeDl::new(url);
+
+    // Handle both full paths and PATH-based commands
+    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
+        // For full paths, use the path directly
+        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
+        youtube_dl.youtube_dl_path(&yt_dlp_path);
+    } else {
+        // For commands in PATH, just use the command name
+        tracing::info!("Using yt-dlp from PATH");
+        youtube_dl.youtube_dl_path("yt-dlp");
     }
 
-    // Return the complete buffer
-    Ok(buffer)
+    let output = match youtube_dl.run_async().await.map_err(|e| {
+        tracing::error!("Error fetching video info: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!("Error fetching video info: {}", e))
+    })? {
+        YoutubeDlOutput::SingleVideo(video) => {
+            tracing::info!(
+                "Successfully fetched info for video: {}",
+                video.title.as_deref().unwrap_or("Unknown")
+            );
+            video
+        }
+        YoutubeDlOutput::Playlist(_) => {
+            tracing::info!("URL points to a playlist, not a single video");
+            return Err(ServerFnError::<NoCustomError>::ServerError(
+                "URL points to a playlist, not a single video".to_string(),
+            ));
+        }
+    };
+
+    // Convert the video info to JSON
+    let json_str = serde_json::to_string(&output).map_err(|e| {
+        tracing::error!("Error serializing video info: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!("Error serializing video info: {}", e))
+    })?;
+
+    tracing::info!("Successfully processed video info");
+    Ok(json_str)
 }
 
-// Additional function to get video details without downloading
-#[server(GetVideoInfo)]
-pub async fn get_video_info(url: String) -> Result<String, ServerFnError> {
-    let video = match Video::new(&url) {
-        Ok(v) => v,
-        Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-    };
-
-    let info = match video.get_basic_info().await {
-        Ok(i) => i,
-        Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-    };
-
-    // Return video title and other basic details as JSON
-    let details_json = match serde_json::to_string(&info.video_details) {
-        Ok(json) => json,
-        Err(e) => return Err(ServerFnError::ServerError(e.to_string())),
-    };
-
-    Ok(details_json)
-}
-
+/// Search YouTube videos
 #[server(SearchYoutube)]
-pub async fn search_youtube(query: String) -> Result<(), ServerFnError> {
-    let youtube = YouTube::new().unwrap();
+pub async fn search_youtube(query: String) -> Result<String, ServerFnError<NoCustomError>> {
+    tracing::info!("Searching YouTube for: {}", query);
 
-    let res = youtube.search(&query, None).await;
+    // Ensure yt-dlp is available
+    let yt_dlp_path = match ensure_yt_dlp_available().await {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!("Could not find or download yt-dlp: {}", e);
+            return Err(e);
+        }
+    };
 
-    println!("{res:#?}");
+    // Create search options for YouTube
+    let search_options = youtube_dl::SearchOptions::youtube(query).with_count(10); // Get 10 results
 
-    Ok(())
+    // Run the search with proper path handling
+    let mut youtube_dl = YoutubeDl::search_for(&search_options);
+
+    // Handle both full paths and PATH-based commands
+    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
+        // For full paths, use the path directly
+        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
+        youtube_dl.youtube_dl_path(&yt_dlp_path);
+    } else {
+        // For commands in PATH, just use the command name
+        tracing::info!("Using yt-dlp from PATH");
+        youtube_dl.youtube_dl_path("yt-dlp");
+    }
+
+    let output = youtube_dl.run_async().await.map_err(|e| {
+        tracing::error!("Error searching: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!("Error searching: {}", e))
+    })?;
+
+    // Convert the output to JSON
+    let json_str = serde_json::to_string(&output).map_err(|e| {
+        tracing::error!("Error serializing search results: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!(
+            "Error serializing search results: {}",
+            e
+        ))
+    })?;
+
+    tracing::info!("Search complete, found results");
+    Ok(json_str)
 }
 
+/// Download with specific format_type and quality
 #[server(DownloadWithQuality)]
 pub async fn download_with_quality(
     url: String,
     format_type: String,
     quality: String,
-) -> Result<Vec<u8>, ServerFnError> {
+) -> Result<Vec<u8>, ServerFnError<NoCustomError>> {
     tracing::info!(
-        "Download with quality - Format: {}, Quality: {}",
+        "Download with format: {}, quality: {}, URL: {}",
         format_type,
-        quality
+        quality,
+        url
     );
 
-    // Validate the URL first
+    // Validate URL format
     if !url.contains("youtube.com/watch?v=") && !url.contains("youtu.be/") {
-        return Err(ServerFnError::ServerError(
+        tracing::error!("Invalid YouTube URL provided: {}", url);
+        return Err(ServerFnError::<NoCustomError>::ServerError(
             "Invalid YouTube URL. Please provide a valid YouTube video URL.".to_string(),
         ));
     }
 
-    // For audio downloads, use the specialized audio-only approach
-    if format_type.to_lowercase() == "audio" {
-        return download_audio_only(url).await;
+    // Ensure yt-dlp is available
+    let yt_dlp_path = match ensure_yt_dlp_available().await {
+        Ok(path) => {
+            tracing::info!("Using yt-dlp at path: {:?}", path);
+            path
+        }
+        Err(e) => {
+            tracing::error!("Could not find or download yt-dlp: {}", e);
+            let message = format!("yt-dlp executable not found. Please ensure that yt-dlp is installed \
+                on your system and is in your PATH. You can install it with: \
+                macOS: 'brew install yt-dlp' or Linux: 'sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp'");
+            return Err(ServerFnError::<NoCustomError>::ServerError(message));
+        }
+    };
+
+    // Check if the file exists before proceeding, but only if it's a full path
+    // If it's just "yt-dlp", it means it was found in PATH and we don't need to check
+    if !yt_dlp_path.to_string_lossy().contains("/") && !yt_dlp_path.to_string_lossy().contains("\\")
+    {
+        tracing::info!("Using yt-dlp from PATH, skipping file existence check");
+    } else if !yt_dlp_path.exists() {
+        let path_str = yt_dlp_path.display().to_string();
+        tracing::error!("yt-dlp path points to non-existent file: {}", path_str);
+        return Err(ServerFnError::<NoCustomError>::ServerError(format!(
+            "yt-dlp executable not found at {}. Please install yt-dlp",
+            path_str
+        )));
     }
 
-    // For video downloads, use a specialized video approach
-    return download_video_with_quality(url, quality).await;
+    // Create temporary directory for the download
+    let temp_dir = std::env::temp_dir().join(format!("youtube_dl_{}", std::process::id()));
+
+    tracing::info!("Creating temp directory at {:?}", temp_dir);
+    std::fs::create_dir_all(&temp_dir).map_err(|e| {
+        tracing::error!("Failed to create temp directory: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!(
+            "Failed to create temp directory: {}",
+            e
+        ))
+    })?;
+
+    let temp_dir_path = temp_dir.to_string_lossy().to_string();
+
+    // Try to resolve the video URL first to get some basic info
+    let video_info = {
+        let mut youtube_dl = YoutubeDl::new(&url);
+
+        // Handle both full paths and PATH-based commands
+        if yt_dlp_path.to_string_lossy().contains("/")
+            || yt_dlp_path.to_string_lossy().contains("\\")
+        {
+            // For full paths, use the path directly
+            youtube_dl.youtube_dl_path(&yt_dlp_path);
+        } else {
+            // For commands in PATH, just use the command name
+            youtube_dl.youtube_dl_path("yt-dlp");
+        }
+
+        match youtube_dl.run_async().await {
+            Ok(output) => match output {
+                YoutubeDlOutput::SingleVideo(video) => Some(video),
+                _ => None,
+            },
+            Err(e) => {
+                tracing::warn!("Could not get video info before download: {}", e);
+                None
+            }
+        }
+    };
+
+    if let Some(info) = &video_info {
+        tracing::info!(
+            "Will download: {} ({})",
+            info.title.as_deref().unwrap_or("Unknown title"),
+            info.duration
+                .as_ref()
+                .map(|d| format!("{:?}", d))
+                .unwrap_or_else(|| "Unknown duration".to_string())
+        );
+    }
+
+    // Configure youtube-dl options based on format type and quality
+    let mut youtube_dl = YoutubeDl::new(&url);
+
+    // Set yt-dlp path and output directory
+    // Handle both full paths and PATH-based commands
+    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
+        // For full paths, use the path directly
+        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
+        youtube_dl.youtube_dl_path(&yt_dlp_path);
+    } else {
+        // For commands in PATH, just use the command name
+        tracing::info!("Using yt-dlp from PATH");
+        youtube_dl.youtube_dl_path("yt-dlp");
+    }
+    youtube_dl.output_directory(&temp_dir_path);
+
+    // Add timeout to prevent hangs
+    youtube_dl.socket_timeout("30");
+    youtube_dl.process_timeout(std::time::Duration::from_secs(300)); // 5 minute timeout
+
+    // Configure format selection based on format_type and quality
+    tracing::info!("Configuring download format");
+    match format_type.to_lowercase().as_str() {
+        "audio" => {
+            youtube_dl.extract_audio(true);
+            youtube_dl.format("bestaudio");
+            youtube_dl.output_template("audio");
+            tracing::info!("Set up audio-only download with best quality");
+        }
+        "video" => {
+            // Configure video quality
+            match quality.to_lowercase().as_str() {
+                "lowest" => {
+                    youtube_dl.format("worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]");
+                    tracing::info!("Set up video download with lowest quality");
+                }
+                "highest" | _ => {
+                    youtube_dl.format("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+                    tracing::info!("Set up video download with highest quality");
+                }
+            }
+            youtube_dl.output_template("video");
+        }
+        _ => {
+            tracing::error!("Invalid format type: {}", format_type);
+            return Err(ServerFnError::<NoCustomError>::ServerError(
+                "Invalid format type. Please specify 'audio' or 'video'.".to_string(),
+            ));
+        }
+    }
+
+    // Execute the download
+    tracing::info!("Starting download with yt-dlp...");
+
+    match youtube_dl.download_to_async(&temp_dir).await {
+        Ok(()) => tracing::info!("Download completed successfully"),
+        Err(e) => {
+            tracing::error!("Download error: {}", e);
+
+            // If we have a youtube-dl error with exit code, log the detailed stderr
+            if let youtube_dl::Error::ExitCode { code, stderr } = &e {
+                tracing::error!("yt-dlp exit code {}, stderr: {}", code, stderr);
+            }
+
+            // Try to clean up the temp directory
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            return Err(ServerFnError::<NoCustomError>::ServerError(format!(
+                "Download failed: {}",
+                e
+            )));
+        }
+    }
+
+    // Find the downloaded file
+    tracing::info!("Looking for downloaded file in {:?}", temp_dir);
+    let downloaded_file = find_downloaded_file(&temp_dir).await.map_err(|e| {
+        tracing::error!("Failed to find downloaded file: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!(
+            "Failed to find downloaded file: {}",
+            e
+        ))
+    })?;
+
+    tracing::info!("Found downloaded file: {}", downloaded_file.display());
+
+    // Read the file content
+    tracing::info!("Reading file content");
+    let content = fs::read(&downloaded_file).await.map_err(|e| {
+        tracing::error!("Failed to read downloaded file: {}", e);
+        ServerFnError::<NoCustomError>::ServerError(format!(
+            "Failed to read downloaded file: {}",
+            e
+        ))
+    })?;
+
+    // Clean up the temp directory
+    tracing::info!("Cleaning up temporary directory");
+    if let Err(e) = fs::remove_dir_all(&temp_dir).await {
+        tracing::warn!("Failed to clean up temp directory: {}", e);
+    }
+
+    tracing::info!("Downloaded {} bytes successfully", content.len());
+    Ok(content)
 }
 
-// Specialized function for audio-only downloads
 #[cfg(feature = "server")]
-async fn download_audio_only(url: String) -> Result<Vec<u8>, ServerFnError> {
-    println!("Using specialized audio-only download approach");
+async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<PathBuf> {
+    let dir_path = dir.as_ref();
+    let dir_str = dir_path.to_string_lossy();
 
-    // Create a video instance with audio-only options
-    let options = VideoOptions {
-        quality: VideoQuality::Highest, // For audio, highest quality is typically best
-        filter: VideoSearchOptions::Audio, // Audio only
-        ..Default::default()
-    };
+    tracing::info!("Scanning directory {} for downloaded files", dir_str);
 
-    let video = match Video::new_with_options(&url, options) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error creating audio download: {}",
-                e
-            )))
-        }
-    };
-
-    // Add FFmpeg args specifically for MP3 output
-    let ffmpeg_args = FFmpegArgs {
-        format: Some("mp3".to_string()), // Force MP3 output format
-        audio_filter: None,
-        video_filter: None,
-    };
-
-    // First try using FFmpeg to get a proper MP3
-    println!("Attempting audio download with FFmpeg");
-    let stream_result = video.stream_with_ffmpeg(Some(ffmpeg_args)).await;
-
-    if let Ok(stream) = stream_result {
-        println!("Successfully created FFmpeg audio stream");
-
-        // Collect all chunks into a buffer
-        let mut buffer = Vec::new();
-        let mut chunk_count = 0;
-
-        // Stream the audio data
-        loop {
-            match stream.chunk().await {
-                Ok(Some(chunk)) => {
-                    buffer.extend_from_slice(&chunk);
-                    chunk_count += 1;
-                    if chunk_count % 10 == 0 {
-                        println!(
-                            "Downloaded {} audio chunks, current size: {} bytes",
-                            chunk_count,
-                            buffer.len()
-                        );
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    println!("Error downloading audio chunk: {}", e);
-                    break;
-                }
-            }
-        }
-
-        if !buffer.is_empty() {
-            println!(
-                "Audio download complete: {} chunks, {} bytes",
-                chunk_count,
-                buffer.len()
-            );
-            return Ok(buffer);
-        }
-    } else {
-        println!("FFmpeg approach failed, trying fallback");
-    }
-
-    // If FFmpeg fails, try the regular download
-    println!("Falling back to standard audio download");
-    let stream = match video.stream().await {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error streaming audio: {}",
-                e
-            )))
-        }
-    };
-
-    // Collect all chunks into a buffer
-    let mut buffer = Vec::new();
-    let mut chunk_count = 0;
-
-    // Stream the audio data
-    loop {
-        match stream.chunk().await {
-            Ok(Some(chunk)) => {
-                buffer.extend_from_slice(&chunk);
-                chunk_count += 1;
-                if chunk_count % 10 == 0 {
-                    println!(
-                        "Downloaded {} audio chunks, current size: {} bytes",
-                        chunk_count,
-                        buffer.len()
-                    );
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                return Err(ServerFnError::ServerError(format!(
-                    "Error downloading audio chunk: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    if buffer.is_empty() {
-        return Err(ServerFnError::ServerError(
-            "Download resulted in empty audio data. Try a different video.".to_string(),
+    // Check if the directory exists
+    if !dir_path.exists() {
+        tracing::error!("Download directory does not exist: {}", dir_str);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Download directory does not exist: {}", dir_str),
         ));
     }
 
-    println!(
-        "Audio download complete: {} chunks, {} bytes",
-        chunk_count,
-        buffer.len()
-    );
-
-    Ok(buffer)
-}
-
-// Specialized function for video downloads
-#[cfg(feature = "server")]
-async fn download_video_with_quality(
-    url: String,
-    quality: String,
-) -> Result<Vec<u8>, ServerFnError> {
-    tracing::info!("Using specialized video download approach");
-
-    // Create a basic video instance first to get available formats
-    let video = match Video::new(&url) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error creating video instance: {}",
-                e
-            )))
-        }
-    };
-
-    // Get video info to see available formats
-    let info = match video.get_basic_info().await {
-        Ok(i) => i,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error getting video info: {}",
-                e
-            )))
-        }
-    };
-
-    tracing::info!("Video found: {}", info.video_details.title);
-    tracing::info!("Total formats available: {:?}", info.formats);
-
-    // Find formats that have both video and audio
-    let combined_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| f.has_video && f.has_audio)
-        .collect();
-
-    // Find video-only formats
-    let video_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| f.has_video && !f.has_audio)
-        .collect();
-
-    // Find audio-only formats
-    let audio_formats: Vec<_> = info
-        .formats
-        .iter()
-        .filter(|f| !f.has_video && f.has_audio)
-        .collect();
-
-    tracing::info!(
-        "Found {:?} formats with both video and audio",
-        combined_formats
-    );
-    tracing::info!("Found {:?} video-only formats", video_formats);
-    tracing::info!("Found {:?} audio-only formats", audio_formats);
-
-    // Log info about some of the formats
-    for (i, fmt) in combined_formats.iter().enumerate().take(3) {
-        tracing::info!(
-            "Combined format {}: itag={}, quality={:?}, has_video={}, has_audio={}, mime_type={:?}",
-            i,
-            fmt.itag,
-            fmt.quality,
-            fmt.has_video,
-            fmt.has_audio,
-            fmt.mime_type
-        );
+    // Check if it's actually a directory
+    if !dir_path.is_dir() {
+        tracing::error!("Path is not a directory: {}", dir_str);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Path is not a directory: {}", dir_str),
+        ));
     }
 
-    for (i, fmt) in video_formats.iter().enumerate().take(3) {
-        tracing::info!(
-            "Video format {}: itag={}, quality={:?}, mime_type={:?}",
-            i,
-            fmt.itag,
-            fmt.quality,
-            fmt.mime_type
-        );
-    }
-
-    for (i, fmt) in audio_formats.iter().enumerate().take(3) {
-        tracing::info!(
-            "Audio format {}: itag={}, quality={:?}, mime_type={:?}",
-            i,
-            fmt.itag,
-            fmt.quality,
-            fmt.mime_type
-        );
-    }
-
-    // Set quality option based on user preference
-    let quality_option = match quality.to_lowercase().as_str() {
-        "lowest" => VideoQuality::Lowest,
-        _ => VideoQuality::Highest, // Default to highest for best video quality
-    };
-
-    // Create options with both video and audio specifically requested
-    // We'll use FFmpeg to combine them properly
-    let options = VideoOptions {
-        quality: quality_option.clone(),
-        filter: VideoSearchOptions::VideoAudio,
-        ..Default::default()
-    };
-
-    // Create video instance with our options
-    let video_instance = match Video::new_with_options(&url, options) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("Error with video and audio options: {}", e);
-            // Try with default options as fallback
-            match Video::new(&url) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(ServerFnError::ServerError(format!(
-                        "Error creating video: {}",
-                        e
-                    )))
-                }
+    // Collect all entries first to avoid the 'continue' in the while loop condition issue
+    let entries = match fs::read_dir(dir_path).await {
+        Ok(mut entries) => {
+            let mut result: Vec<fs::DirEntry> = Vec::new();
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                result.push(entry);
             }
+            result
+        }
+        Err(e) => {
+            tracing::error!("Failed to read directory {}: {}", dir_str, e);
+            return Err(e);
         }
     };
 
-    // Set up improved FFmpeg arguments for proper MP4 output with both video and audio
-    let ffmpeg_args = FFmpegArgs {
-        format: Some("mp4".to_string()),
-        // Force AAC audio codec with decent bitrate for audio
-        audio_filter: Some("-c:a aac -b:a 192k -ar 44100".to_string()),
-        // Force H.264 video codec with good quality settings and compatibility
-        video_filter: Some(
-            "-c:v libx264 -preset medium -crf 22 -pix_fmt yuv420p -movflags +faststart".to_string(),
-        ),
-    };
-
-    // Try to stream with FFmpeg - this should handle separate video/audio streams
-    tracing::info!("Attempting video download with FFmpeg (handles separate streams)");
-
-    // Always try FFmpeg first - it's our best shot at getting video+audio combined
-    if let Ok(stream) = video_instance
-        .stream_with_ffmpeg(Some(ffmpeg_args.clone()))
-        .await
-    {
-        tracing::info!("Successfully created FFmpeg stream with optimized settings");
-
-        // Collect the data
-        let mut buffer = Vec::new();
-        let mut chunk_count = 0;
-
-        loop {
-            match stream.chunk().await {
-                Ok(Some(chunk)) => {
-                    buffer.extend_from_slice(&chunk);
-                    chunk_count += 1;
-                    if chunk_count % 10 == 0 {
-                        tracing::info!(
-                            "Downloaded {} video chunks, current size: {} bytes",
-                            chunk_count,
-                            buffer.len()
-                        );
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::error!("Error downloading video chunk: {}", e);
-                    break;
-                }
-            }
+    // First look for files
+    for entry in &entries {
+        let path = entry.path();
+        if path.is_file() {
+            let filename = path.file_name().unwrap_or_default().to_string_lossy();
+            let size = match fs::metadata(&path).await {
+                Ok(meta) => meta.len(),
+                Err(_) => 0,
+            };
+            tracing::info!("Found file: {} ({} bytes)", filename, size);
+            return Ok(path);
         }
-
-        if !buffer.is_empty() {
-            tracing::info!(
-                "Video download complete: {} chunks, {} bytes",
-                chunk_count,
-                buffer.len()
-            );
-            return Ok(buffer);
-        }
-    } else {
-        tracing::error!("FFmpeg approach with optimized settings failed, trying alternative");
     }
 
-    // If the first attempt failed, try another approach with more explicit format selection
-
-    // Find best video format based on quality
-    let best_video_format = if !video_formats.is_empty() {
-        // Directly choose based on quality without using sorted_formats variable
-        if quality.to_lowercase() == "lowest" {
-            // Find the lowest resolution format
-            video_formats
-                .iter()
-                .min_by_key(|f| f.height.unwrap_or(0))
-                .cloned() // Clone the format to avoid reference issues
-        } else {
-            // Find the highest resolution format (default)
-            video_formats
-                .iter()
-                .max_by_key(|f| f.height.unwrap_or(0))
-                .cloned() // Clone the format to avoid reference issues
-        }
-    } else {
-        None
-    };
-
-    // Find best audio format (prefer higher quality)
-    let best_audio_format = if !audio_formats.is_empty() {
-        // Return a clone rather than a reference
-        audio_formats.first().cloned()
-    } else {
-        None
-    };
-
-    if let (Some(video_fmt), Some(audio_fmt)) = (best_video_format, best_audio_format) {
-        tracing::info!(
-            "Trying explicit format combo: Video itag={} ({}p), Audio itag={}",
-            video_fmt.itag,
-            video_fmt.height.unwrap_or(0),
-            audio_fmt.itag
-        );
-
-        // Create custom options targeting these specific formats
-        let options = VideoOptions {
-            quality: quality_option.clone(),
-            filter: VideoSearchOptions::VideoAudio,
-            ..Default::default()
-        };
-
-        let explicit_video = match Video::new_with_options(&url, options) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Error with explicit format options: {}", e);
-                return Err(ServerFnError::ServerError(format!(
-                    "Error with format selection: {}",
-                    e
-                )));
-            }
-        };
-
-        // Try with FFmpeg again with our explicit format selection
-        if let Ok(stream) = explicit_video.stream_with_ffmpeg(Some(ffmpeg_args)).await {
-            tracing::info!("Successfully created explicit format FFmpeg stream");
-
-            let mut buffer = Vec::new();
-            let mut chunk_count = 0;
-
-            loop {
-                match stream.chunk().await {
-                    Ok(Some(chunk)) => {
-                        buffer.extend_from_slice(&chunk);
-                        chunk_count += 1;
-                        if chunk_count % 10 == 0 {
+    // If no files found, try subdirectories
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            tracing::info!("Checking subdirectory: {}", path.display());
+            match fs::read_dir(&path).await {
+                Ok(mut subentries) => {
+                    // Check for any files in this subdirectory
+                    while let Ok(Some(subentry)) = subentries.next_entry().await {
+                        let subpath = subentry.path();
+                        if subpath.is_file() {
+                            let filename =
+                                subpath.file_name().unwrap_or_default().to_string_lossy();
+                            let size = match fs::metadata(&subpath).await {
+                                Ok(meta) => meta.len(),
+                                Err(_) => 0,
+                            };
                             tracing::info!(
-                                "Downloaded {} explicit format chunks, size: {} bytes",
-                                chunk_count,
-                                buffer.len()
+                                "Found file in subdirectory: {} ({} bytes)",
+                                filename,
+                                size
                             );
+                            return Ok(subpath);
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("Error downloading explicit format chunk: {}", e);
-                        break;
-                    }
                 }
-            }
-
-            if !buffer.is_empty() {
-                tracing::info!(
-                    "Explicit format download complete: {} chunks, {} bytes",
-                    chunk_count,
-                    buffer.len()
-                );
-                return Ok(buffer);
+                Err(e) => {
+                    tracing::warn!("Failed to read subdirectory {}: {}", path.display(), e);
+                }
             }
         }
     }
 
-    // Try using rusty_ytdl's default approach which might handle separate streams
-    tracing::info!("Trying default download approach");
-    let default_video = match Video::new(&url) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(ServerFnError::ServerError(format!(
-                "Error creating video: {}",
-                e
-            )))
-        }
-    };
-
-    // Last resort: Try direct streaming with rusty_ytdl's default handling
-    match default_video.stream().await {
-        Ok(stream) => {
-            tracing::info!("Successfully created default stream");
-
-            // Collect the data
-            let mut buffer = Vec::new();
-            let mut chunk_count = 0;
-
-            loop {
-                match stream.chunk().await {
-                    Ok(Some(chunk)) => {
-                        buffer.extend_from_slice(&chunk);
-                        chunk_count += 1;
-                        if chunk_count % 10 == 0 {
-                            tracing::info!(
-                                "Downloaded {} default chunks, current size: {} bytes",
-                                chunk_count,
-                                buffer.len()
-                            );
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::error!("Error downloading default chunk: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            if !buffer.is_empty() {
-                tracing::info!(
-                    "Default download complete: {} chunks, {} bytes",
-                    chunk_count,
-                    buffer.len()
-                );
-                return Ok(buffer);
-            }
-
-            Err(ServerFnError::ServerError(
-                "Failed to download video with any method. The video might be restricted."
-                    .to_string(),
-            ))
-        }
-        Err(e) => Err(ServerFnError::ServerError(format!(
-            "Error streaming video: {}. The video might be restricted or unavailable.",
-            e
-        ))),
-    }
+    tracing::error!(
+        "No files found in {} or its immediate subdirectories",
+        dir_str
+    );
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "No downloaded file found",
+    ))
 }

@@ -8,19 +8,34 @@ edition = "2021"
 
 [dependencies]
 dioxus = { version = "0.6.0", features = ["router", "fullstack"] }
-rusty_ytdl = { git = "https://github.com/Mithronn/rusty_ytdl", optional = true, features = [
-    "ffmpeg",
-] }
+youtube_dl = { version = "0.10.0", features = [
+    "downloader-rustls-tls",
+], optional = true }
 base64 = "0.21.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1", features = ["full"], optional = true }
+tracing = "0.1"
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAnchorElement",
+    "HtmlMediaElement",
+    "Document",
+    "Element",
+    "Window",
+    "CssStyleDeclaration",
+], optional = true }
 
 [features]
-default = []
-web = ["dioxus/web"]
+default = ["server"]
+web = ["dioxus/web", "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-server = ["dioxus/server", "dep:rusty_ytdl"]
+server = ["dioxus/server", "dep:youtube_dl", "dep:tokio"]
 
 [profile]
 
