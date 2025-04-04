@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde_json;
 use server_fn::error::NoCustomError;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
 use tracing;
 
@@ -58,7 +59,18 @@ pub async fn download_with_quality(
 
     #[cfg(feature = "server")]
     {
-        // Create temporary directory for the download
+        // Create a unique ID and progress file immediately
+        let progress_id = format!("download_{}", url.len());
+        let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
+
+        // Initialize progress file right away to show something to the user
+        let mut initial_progress = DownloadProgress::default();
+        initial_progress.status = "Initializing download...".to_string();
+        if let Ok(json) = serde_json::to_string(&initial_progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
+
+        // Create temporary directory for the download - this should be fast
         let temp_dir = std::env::temp_dir().join(format!("youtube_dl_{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).map_err(|e| {
             ServerFnError::<NoCustomError>::ServerError(format!(
@@ -68,64 +80,75 @@ pub async fn download_with_quality(
         })?;
 
         let temp_dir_path = temp_dir.to_string_lossy().to_string();
-        tracing::info!("Creating temp directory at {:?}", temp_dir_path);
+        tracing::info!("Created temp directory at {:?}", temp_dir_path);
 
-        // Generate a unique ID for this download
-        let progress_id = format!("download_{}", url.len());
-        let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
+        // Store URL for background tasks
+        let url_str = url.clone();
 
-        // Initialize progress file
-        let initial_progress = DownloadProgress::default();
-        if let Ok(json) = serde_json::to_string(&initial_progress) {
-            let _ = std::fs::write(&progress_file, json);
-        }
+        // Start a task to update the progress file periodically
+        tokio::spawn({
+            let progress_file = progress_file.clone();
+            async move {
+                // Update progress every second while we initialize
+                for i in 1..30 {
+                    // timeout after 30 seconds
+                    let mut progress = DownloadProgress::default();
+                    progress.status = format!("Preparing download ({}s)...", i);
+                    if let Ok(json) = serde_json::to_string(&progress) {
+                        let _ = std::fs::write(&progress_file, json);
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            }
+        });
 
-        // Configure youtube-dl options based on format type and quality
+        // Pre-configure youtube-dl with basic options common to all formats
         let mut youtube_dl = YoutubeDl::new(&url);
-
-        // Set output directory
         youtube_dl.output_directory(&temp_dir_path);
-
-        // Add verbose output for better progress information
         youtube_dl.extra_arg("--verbose");
         youtube_dl.socket_timeout("60");
 
         // Get video info first to determine estimated size and title
-        let mut video_title = String::from("Unknown");
-        let mut estimated_size: u64 = 0;
+        // But do it in a way that doesn't block the UI
+        let video_info_task = tokio::spawn({
+            let url = url_str.clone();
+            async move {
+                // Create a quick youtube-dl instance just for getting info
+                let mut info_dl = YoutubeDl::new(&url);
+                info_dl.socket_timeout("30");
 
-        match youtube_dl.clone().socket_timeout("30").run_async().await {
-            Ok(YoutubeDlOutput::SingleVideo(video)) => {
-                if let Some(title) = &video.title {
-                    video_title = title.clone();
-                    tracing::info!("Will download: {:?}", title);
+                // We only need certain fields, so let's extract those
+                match info_dl.run_async().await {
+                    Ok(YoutubeDlOutput::SingleVideo(video)) => {
+                        let mut result = (String::from("Unknown"), 0u64);
 
-                    // Update progress file with title
-                    let mut progress = initial_progress.clone();
-                    progress.status = format!("Preparing to download: {}", title);
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = std::fs::write(&progress_file, json);
-                    }
-                }
+                        // Extract title
+                        if let Some(title) = &video.title {
+                            result.0 = title.clone();
+                        }
 
-                // Try to get filesize from formats
-                if let Some(formats) = video.formats {
-                    for format in formats {
-                        if let Some(size) = format.filesize {
-                            // Make sure both values are the same type (u64)
-                            let size_u64 = size as u64;
-                            if size_u64 > estimated_size {
-                                estimated_size = size_u64;
+                        // Extract estimated size
+                        if let Some(formats) = video.formats {
+                            for format in formats {
+                                if let Some(size) = format.filesize {
+                                    // Make sure both values are the same type (u64)
+                                    let size_u64 = size as u64;
+                                    if size_u64 > result.1 {
+                                        result.1 = size_u64;
+                                    }
+                                }
                             }
                         }
+
+                        Some(result)
                     }
+                    _ => None,
                 }
             }
-            _ => {}
-        }
+        });
 
-        tracing::info!("Configuring download format");
-        // Configure format selection based on format_type and quality
+        // Configure format selection right away based on format_type and quality
+        // This is fast and can be done synchronously
         match format_type.to_lowercase().as_str() {
             "audio" => {
                 youtube_dl.extract_audio(true);
@@ -161,6 +184,27 @@ pub async fn download_with_quality(
                     "Invalid format type. Please specify 'audio' or 'video'.".to_string(),
                 ));
             }
+        }
+
+        // Wait for video info (but don't block too long - max 10 seconds)
+        let (video_title, estimated_size) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(10), video_info_task)
+                .await
+                .unwrap_or(Ok(None))
+                .unwrap_or(None)
+                .unwrap_or((String::from("Unknown"), 0));
+
+        tracing::info!(
+            "Will download: {:?} (est. size: {})",
+            video_title,
+            estimated_size
+        );
+
+        // Update progress file with title
+        let mut progress = DownloadProgress::default();
+        progress.status = format!("Starting download: {}", video_title);
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
         }
 
         // Launch a separate task to monitor the download progress by checking file size
@@ -400,30 +444,39 @@ pub async fn download_with_quality(
         // Get file size
         let file_size = content.len() as i64;
 
-        // Save download info to database
+        // Save download info to database in the background
         #[cfg(feature = "server")]
         {
-            if let Err(e) = save_download_info(
-                &url,
-                &video_title,
-                &file_name,
-                &file_path_for_db,
-                &if format_type.is_empty() {
-                    "video".to_string()
-                } else {
-                    format_type.clone()
-                },
-                &if quality.is_empty() {
-                    "best".to_string()
-                } else {
-                    quality.clone()
-                },
-                file_size,
-            )
-            .await
-            {
-                tracing::error!("Database error: {}", e);
-            }
+            let url = url.clone();
+            let video_title = video_title.clone();
+            let file_name = file_name.clone();
+            let file_path_for_db = file_path_for_db.clone();
+            let format_type = format_type.clone();
+            let quality = quality.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = save_download_info(
+                    &url,
+                    &video_title,
+                    &file_name,
+                    &file_path_for_db,
+                    &if format_type.is_empty() {
+                        "video".to_string()
+                    } else {
+                        format_type
+                    },
+                    &if quality.is_empty() {
+                        "best".to_string()
+                    } else {
+                        quality
+                    },
+                    file_size,
+                )
+                .await
+                {
+                    tracing::error!("Database error: {}", e);
+                }
+            });
         }
 
         tracing::info!("Downloaded {} bytes successfully", content.len());
@@ -444,8 +497,14 @@ pub async fn download_video_with_progress(
     path: Option<String>,
     set_progress: impl Fn(f32, Option<String>, Option<String>) + Clone + Send + 'static,
 ) -> Result<String, String> {
+    // Start a background task to get video info
+    let video_info_future = super::info::get_video_info(url.clone());
+
+    // Immediately update progress to show user something is happening
+    set_progress(0.0, Some("Fetching video information...".to_string()), None);
+
     // First fetch video information
-    let video_info = super::info::get_video_info(url.clone())
+    let video_info = video_info_future
         .await
         .map_err(|e| format!("Error fetching video info: {}", e))?;
 
@@ -459,17 +518,25 @@ pub async fn download_video_with_progress(
         .unwrap_or("unknown_title")
         .to_string();
 
-    // Download the video - this returns Vec<u8>
-    let result = download_with_quality(
+    // Update progress to show we're starting the download
+    set_progress(0.05, Some(format!("Starting download of: {}", title)), None);
+
+    // Start the video download
+    set_progress(0.1, Some("Preparing download...".to_string()), None);
+    let download_future = download_with_quality(
         url.clone(),
         format.clone().unwrap_or_else(|| "video".to_string()),
         quality.clone().unwrap_or_else(|| "highest".to_string()),
-    )
-    .await;
+    );
+
+    // Now actually perform the download
+    let result = download_future.await;
 
     match result {
         Ok(content) => {
             // For database, we need to save some metadata
+            set_progress(0.9, Some("Saving video file...".to_string()), None);
+
             // Since we have the content as Vec<u8>, we need to save it to a file first
             let temp_file = std::env::temp_dir().join(format!(
                 "{}_{}.mp4",
@@ -524,26 +591,39 @@ pub async fn download_video_with_progress(
             // Get file size
             let file_size = content.len() as i64;
 
-            // Save download info to database
+            // Save download info to database (in background)
             #[cfg(feature = "server")]
             {
-                if let Err(e) = save_download_info(
-                    &url,
-                    &title,
-                    &filename,
-                    &file_path_for_db,
-                    &format.clone().unwrap_or_else(|| "video".to_string()),
-                    &quality.clone().unwrap_or_else(|| "best".to_string()),
-                    file_size,
-                )
-                .await
-                {
-                    tracing::error!("Database error: {}", e);
-                }
+                let url = url.clone();
+                let title = title.clone();
+                let filename = filename.clone();
+                let file_path_for_db = file_path_for_db.clone();
+                let format = format.clone();
+                let quality = quality.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = save_download_info(
+                        &url,
+                        &title,
+                        &filename,
+                        &file_path_for_db,
+                        &format.clone().unwrap_or_else(|| "video".to_string()),
+                        &quality.clone().unwrap_or_else(|| "best".to_string()),
+                        file_size,
+                    )
+                    .await
+                    {
+                        tracing::error!("Database error: {}", e);
+                    }
+                });
             }
 
+            set_progress(1.0, Some("Download complete!".to_string()), None);
             Ok(file_path)
         }
-        Err(e) => Err(format!("Download error: {}", e)),
+        Err(e) => {
+            set_progress(1.0, Some(format!("Error: {}", e)), None);
+            Err(format!("Download error: {}", e))
+        }
     }
 }
