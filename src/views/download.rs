@@ -1,5 +1,5 @@
 use crate::server::download::download_with_quality;
-use base64::{self};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use dioxus::prelude::*;
 
 // Enum for format type selection
@@ -102,12 +102,12 @@ pub fn Download() -> Element {
             };
 
             // Remove any existing extension
-            let filename_value = filename(); // Store in a variable to avoid temporary value issue
-            let base_name = if filename_value.contains('.') {
-                let parts: Vec<&str> = filename_value.split('.').collect();
+            let filename_str = filename(); // Store in a local variable first
+            let base_name = if filename_str.contains('.') {
+                let parts: Vec<&str> = filename_str.split('.').collect();
                 parts[0].to_string()
             } else {
-                filename_value.clone()
+                filename_str
             };
 
             filename.set(format!("{}.{}", base_name, extension));
@@ -208,17 +208,79 @@ pub fn Download() -> Element {
                 FormatType::Audio => "audio/mpeg",
             };
 
+            // Get the extension based on the chosen format
+            let extension = match format_type() {
+                FormatType::Video => "mp4",
+                FormatType::Audio => "mp3",
+            };
+
+            // Ensure the filename has the correct extension
+            let download_filename = if filename().ends_with(extension) {
+                filename().clone()
+            } else {
+                // Remove any existing extension and add the correct one
+                let filename_str = filename().clone(); // Store in a local variable first
+                let base_name = if filename_str.contains('.') {
+                    let parts: Vec<&str> = filename_str.split('.').collect();
+                    parts[0].to_string()
+                } else {
+                    filename_str
+                };
+                format!("{}.{}", base_name, extension)
+            };
+
             rsx! {
                 div { class: "mt-6 p-6 bg-green-900 bg-opacity-20 rounded-lg border border-green-700",
                     p { class: "text-green-400 font-medium mb-4",
                         "✓ Your file is ready to download!"
                     }
+
+                    // Separate components for the two format types
+                    match format_type() {
+                        FormatType::Video => rsx! {
+                            p { class: "text-gray-300 mb-4",
+                                "File format: ",
+                                span { class: "font-bold", "Video (MP4)" }
+                            }
+                        },
+                        FormatType::Audio => rsx! {
+                            p { class: "text-gray-300 mb-4",
+                                "File format: ",
+                                span { class: "font-bold", "Audio (MP3)" }
+                            }
+                        }
+                    }
+
                     div { class: "text-center",
                         a {
                             class: "inline-block w-full sm:w-auto px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium text-white transition-colors duration-200",
-                            href: format!("data:{};base64,{}", mime_type, base64::encode(&data)),
-                            download: "{filename}",
+                            href: format!("data:{};base64,{}", mime_type, STANDARD.encode(&data)),
+                            download: "{download_filename}",
                             "Save to Device"
+                        }
+                    }
+
+                    // Also separate components for the preview
+                    match format_type() {
+                        FormatType::Video => rsx! {
+                            div { class: "mt-4 pt-4 border-t border-green-700",
+                                p { class: "text-gray-300 mb-2", "Preview:" }
+                                video {
+                                    class: "w-full max-h-96 rounded",
+                                    controls: true,
+                                    src: format!("data:{};base64,{}", mime_type, STANDARD.encode(&data))
+                                }
+                            }
+                        },
+                        FormatType::Audio => rsx! {
+                            div { class: "mt-4 pt-4 border-t border-green-700",
+                                p { class: "text-gray-300 mb-2", "Preview:" }
+                                audio {
+                                    class: "w-full",
+                                    controls: true,
+                                    src: format!("data:{};base64,{}", mime_type, STANDARD.encode(&data))
+                                }
+                            }
                         }
                     }
                 }

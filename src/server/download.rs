@@ -8,42 +8,6 @@ use rusty_ytdl::{FFmpegArgs, Video, VideoFormat, VideoOptions, VideoQuality, Vid
 #[cfg(feature = "server")]
 use serde_json;
 
-// Helper function to select the best format based on quality preference
-#[cfg(feature = "server")]
-fn select_best_format<'a>(
-    formats: &[&'a VideoFormat],
-    quality: VideoQuality,
-) -> Option<&'a VideoFormat> {
-    if formats.is_empty() {
-        return None;
-    }
-
-    // Default to highest quality
-    match quality {
-        VideoQuality::Highest => formats
-            .iter()
-            .max_by_key(|f| {
-                f.quality
-                    .clone()
-                    .unwrap_or_default()
-                    .parse::<u32>()
-                    .unwrap_or(0)
-            })
-            .copied(),
-        VideoQuality::Lowest => formats
-            .iter()
-            .min_by_key(|f| {
-                f.quality
-                    .clone()
-                    .unwrap_or_default()
-                    .parse::<u32>()
-                    .unwrap_or(0)
-            })
-            .copied(),
-        _ => formats.first().copied(), // For other quality settings, just pick the first format
-    }
-}
-
 #[server(Echo)]
 pub async fn echo(input: String) -> Result<String, ServerFnError> {
     Ok(input)
@@ -593,19 +557,20 @@ async fn download_video_with_quality(
         _ => VideoQuality::Highest, // Default to highest for best video quality
     };
 
-    // For modern YouTube videos, we need to handle separate video and audio streams
-    // Try downloading with FFmpeg which can handle combining separate streams
+    // Create options with both video and audio specifically requested
+    // We'll use FFmpeg to combine them properly
     let options = VideoOptions {
         quality: quality_option.clone(),
-        filter: VideoSearchOptions::Video, // First try just getting the video
+        filter: VideoSearchOptions::VideoAudio,
         ..Default::default()
     };
 
+    // Create video instance with our options
     let video_instance = match Video::new_with_options(&url, options) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("Error with video-only options: {}", e);
-            // Try with default options
+            tracing::error!("Error with video and audio options: {}", e);
+            // Try with default options as fallback
             match Video::new(&url) {
                 Ok(v) => v,
                 Err(e) => {
@@ -618,7 +583,7 @@ async fn download_video_with_quality(
         }
     };
 
-    // Set up improved FFmpeg arguments for proper MP4 output
+    // Set up improved FFmpeg arguments for proper MP4 output with both video and audio
     let ffmpeg_args = FFmpegArgs {
         format: Some("mp4".to_string()),
         // Force AAC audio codec with decent bitrate for audio
@@ -629,9 +594,14 @@ async fn download_video_with_quality(
         ),
     };
 
-    // Try to stream with FFmpeg - it can handle separate video/audio streams
+    // Try to stream with FFmpeg - this should handle separate video/audio streams
     tracing::info!("Attempting video download with FFmpeg (handles separate streams)");
-    if let Ok(stream) = video_instance.stream_with_ffmpeg(Some(ffmpeg_args)).await {
+
+    // Always try FFmpeg first - it's our best shot at getting video+audio combined
+    if let Ok(stream) = video_instance
+        .stream_with_ffmpeg(Some(ffmpeg_args.clone()))
+        .await
+    {
         tracing::info!("Successfully created FFmpeg stream with optimized settings");
 
         // Collect the data
@@ -668,10 +638,105 @@ async fn download_video_with_quality(
             return Ok(buffer);
         }
     } else {
-        tracing::error!("FFmpeg approach with optimized settings failed, trying fallback");
+        tracing::error!("FFmpeg approach with optimized settings failed, trying alternative");
     }
 
-    // Try using rusty_ytdl's default approach which can handle separate streams
+    // If the first attempt failed, try another approach with more explicit format selection
+
+    // Find best video format based on quality
+    let best_video_format = if !video_formats.is_empty() {
+        // Directly choose based on quality without using sorted_formats variable
+        if quality.to_lowercase() == "lowest" {
+            // Find the lowest resolution format
+            video_formats
+                .iter()
+                .min_by_key(|f| f.height.unwrap_or(0))
+                .cloned() // Clone the format to avoid reference issues
+        } else {
+            // Find the highest resolution format (default)
+            video_formats
+                .iter()
+                .max_by_key(|f| f.height.unwrap_or(0))
+                .cloned() // Clone the format to avoid reference issues
+        }
+    } else {
+        None
+    };
+
+    // Find best audio format (prefer higher quality)
+    let best_audio_format = if !audio_formats.is_empty() {
+        // Return a clone rather than a reference
+        audio_formats.first().cloned()
+    } else {
+        None
+    };
+
+    if let (Some(video_fmt), Some(audio_fmt)) = (best_video_format, best_audio_format) {
+        tracing::info!(
+            "Trying explicit format combo: Video itag={} ({}p), Audio itag={}",
+            video_fmt.itag,
+            video_fmt.height.unwrap_or(0),
+            audio_fmt.itag
+        );
+
+        // Create custom options targeting these specific formats
+        let options = VideoOptions {
+            quality: quality_option.clone(),
+            filter: VideoSearchOptions::VideoAudio,
+            ..Default::default()
+        };
+
+        let explicit_video = match Video::new_with_options(&url, options) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Error with explicit format options: {}", e);
+                return Err(ServerFnError::ServerError(format!(
+                    "Error with format selection: {}",
+                    e
+                )));
+            }
+        };
+
+        // Try with FFmpeg again with our explicit format selection
+        if let Ok(stream) = explicit_video.stream_with_ffmpeg(Some(ffmpeg_args)).await {
+            tracing::info!("Successfully created explicit format FFmpeg stream");
+
+            let mut buffer = Vec::new();
+            let mut chunk_count = 0;
+
+            loop {
+                match stream.chunk().await {
+                    Ok(Some(chunk)) => {
+                        buffer.extend_from_slice(&chunk);
+                        chunk_count += 1;
+                        if chunk_count % 10 == 0 {
+                            tracing::info!(
+                                "Downloaded {} explicit format chunks, size: {} bytes",
+                                chunk_count,
+                                buffer.len()
+                            );
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("Error downloading explicit format chunk: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            if !buffer.is_empty() {
+                tracing::info!(
+                    "Explicit format download complete: {} chunks, {} bytes",
+                    chunk_count,
+                    buffer.len()
+                );
+                return Ok(buffer);
+            }
+        }
+    }
+
+    // Try using rusty_ytdl's default approach which might handle separate streams
     tracing::info!("Trying default download approach");
     let default_video = match Video::new(&url) {
         Ok(v) => v,
@@ -683,7 +748,7 @@ async fn download_video_with_quality(
         }
     };
 
-    // Try direct streaming with rusty_ytdl's default handling
+    // Last resort: Try direct streaming with rusty_ytdl's default handling
     match default_video.stream().await {
         Ok(stream) => {
             tracing::info!("Successfully created default stream");
