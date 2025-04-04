@@ -1,0 +1,6 @@
+[diagnostics]
+disabled = ["inactive-code", "non-snake-case"]
+
+
+[cargo]
+features = ["server"]
