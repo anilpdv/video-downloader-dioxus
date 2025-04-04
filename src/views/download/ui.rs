@@ -1,6 +1,4 @@
-use crate::views::download::handlers::{
-    execute_download, simulate_download_progress, update_filename,
-};
+use crate::views::download::handlers::{execute_download, update_filename};
 use crate::views::download::platforms::trigger_download;
 use crate::views::download::types::{FormatType, Quality};
 use dioxus::prelude::*;
@@ -144,15 +142,21 @@ pub fn Download() -> Element {
             rsx! {}
         };
 
+        // Get status message for display
+        let status_text = match status() {
+            Some(stat) => stat,
+            None => "Downloading...".to_string(),
+        };
+
         rsx! {
             div { class: "mt-4",
                 div { class: "mb-2 flex justify-between",
-                    span { class: "text-gray-300", "Downloading..." }
+                    span { class: "text-gray-300", "{status_text}" }
                     span { class: "text-gray-300", "{progress_percent()}%" }
                 }
                 div { class: "w-full bg-gray-700 rounded-full h-2.5",
                     div {
-                        class: "bg-blue-600 h-2.5 rounded-full",
+                        class: "bg-blue-600 h-2.5 rounded-full transition-all duration-500 ease-out",
                         style: "width: {progress_percent()}%",
                     }
                 }

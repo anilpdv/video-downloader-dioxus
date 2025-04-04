@@ -218,20 +218,41 @@ pub fn execute_download(
                     // Import GetDownloadProgress function
                     use crate::server::download::handlers::get_download_progress;
 
-                    // Check progress every 250ms while download is in progress
+                    // Use a longer delay between progress checks to reduce request frequency
+                    let poll_interval = std::time::Duration::from_millis(750);
+
+                    // Track the last progress value to implement smoothing
+                    let mut last_progress = 0;
+                    let mut last_status = String::new();
+
+                    // Check progress while download is in progress
                     while simulating_for_progress() {
                         match get_download_progress(url.clone()).await {
                             Ok((downloaded, total, eta_seconds, status)) => {
                                 // Calculate progress percentage (0-100)
-                                let progress_pct = if total > 0 {
+                                let raw_progress_pct = if total > 0 {
                                     ((downloaded as f64 / total as f64) * 100.0) as i32
                                 } else {
                                     // If total is 0, use the raw downloaded value (assuming 0-100 range)
                                     downloaded as i32
                                 };
 
-                                // Update UI with real progress
-                                sim_progress_for_progress.set(progress_pct);
+                                // Apply smoothing - only update if progress has changed significantly or status changed
+                                let smooth_progress = if raw_progress_pct > last_progress + 1
+                                    || status != last_status
+                                {
+                                    // Never decrease progress and don't jump too far ahead
+                                    let new_progress = raw_progress_pct.max(last_progress);
+                                    last_progress = new_progress;
+                                    last_status = status.clone();
+                                    new_progress
+                                } else {
+                                    // Don't update UI if change is minimal
+                                    continue;
+                                };
+
+                                // Update UI with smoothed progress
+                                sim_progress_for_progress.set(smooth_progress);
                                 status_sig_for_progress.set(Some(status.clone()));
 
                                 // Format ETA
@@ -246,7 +267,7 @@ pub fn execute_download(
                             }
                         }
 
-                        // Short delay between progress checks
+                        // Longer delay between progress checks to avoid overwhelming the server
                         #[cfg(feature = "web")]
                         {
                             use js_sys::Promise;
@@ -262,7 +283,7 @@ pub fn execute_download(
                                     let _ = window
                                         .set_timeout_with_callback_and_timeout_and_arguments_0(
                                             closure.as_ref().unchecked_ref(),
-                                            250, // 250ms delay
+                                            poll_interval.as_millis() as i32,
                                         );
                                 });
 
@@ -272,8 +293,7 @@ pub fn execute_download(
 
                         #[cfg(not(feature = "web"))]
                         {
-                            use std::time::Duration;
-                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            tokio::time::sleep(poll_interval).await;
                         }
 
                         // Stop checking if we're no longer simulating
