@@ -44,8 +44,12 @@ pub fn Download() -> Element {
     // Handle format type change
     let mut handle_format_change = move |new_format: FormatType| {
         format_type.set(new_format.clone());
-        let new_filename = update_filename(&filename(), &new_format);
-        filename.set(new_filename);
+
+        // Always update the filename extension when format changes
+        if !filename().is_empty() {
+            let new_filename = update_filename(&filename(), &new_format);
+            filename.set(new_filename);
+        }
     };
 
     // Handle the download button click
@@ -326,13 +330,13 @@ pub fn Download() -> Element {
                     FormatType::Video => rsx! {
                         p { class: "text-gray-300 mb-4",
                             "File format: "
-                            span { class: "font-bold", "Video (MP4)" }
+                            span { class: "font-bold text-red-400", "Video (MP4)" }
                         }
                     },
                     FormatType::Audio => rsx! {
                         p { class: "text-gray-300 mb-4",
                             "File format: "
-                            span { class: "font-bold", "Audio (MP3)" }
+                            span { class: "font-bold text-blue-400", "Audio (MP3)" }
                         }
                     },
                 }

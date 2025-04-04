@@ -37,6 +37,14 @@ impl FormatType {
             FormatType::Audio => "audio/mpeg",
         }
     }
+
+    // Add helper to check extension
+    pub fn has_valid_extension(&self, filename: &str) -> bool {
+        let extension = self.get_extension();
+        filename
+            .to_lowercase()
+            .ends_with(&format!(".{}", extension))
+    }
 }
 
 impl Quality {

@@ -440,8 +440,13 @@ pub async fn download_with_quality(
             "audio" => {
                 youtube_dl.extract_audio(true);
                 youtube_dl.format("bestaudio");
+                youtube_dl.extra_arg("-x"); // Extract audio
+                youtube_dl.extra_arg("--audio-format"); // Specify format
+                youtube_dl.extra_arg("mp3"); // Force MP3 format
+                youtube_dl.extra_arg("--audio-quality"); // Specify quality
+                youtube_dl.extra_arg("0"); // Best quality (0=best, 9=worst)
                 youtube_dl.output_template("audio");
-                tracing::info!("Set up audio download with highest quality");
+                tracing::info!("Set up audio download with highest quality (mp3 format)");
             }
             "video" => {
                 // Configure video quality
@@ -683,17 +688,25 @@ async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<std::path::Pa
         dir_path.display()
     );
 
+    // First try to find any media file
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
+        tracing::info!("Found file: {:?}", path);
+
         if path.is_file() {
             // Check the file extension for media types
             if let Some(ext) = path.extension() {
                 let ext_str = ext.to_string_lossy().to_lowercase();
-                if ["mp4", "mp3", "m4a", "webm", "mkv"].contains(&ext_str.as_str()) {
+                // Add more audio formats to the list
+                if [
+                    "mp4", "mp3", "m4a", "webm", "mkv", "opus", "ogg", "wav", "aac", "flac",
+                ]
+                .contains(&ext_str.as_str())
+                {
                     // Get file size for logging
                     if let Ok(metadata) = fs::metadata(&path).await {
                         tracing::info!(
-                            "Found file: {} ({} bytes)",
+                            "Found media file: {} ({} bytes)",
                             path.file_name().unwrap_or_default().to_string_lossy(),
                             metadata.len()
                         );
@@ -704,6 +717,20 @@ async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<std::path::Pa
         }
     }
 
+    // Try again to find ANY file if we didn't find a media file
+    let mut entries = fs::read_dir(dir_path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() {
+            tracing::info!(
+                "Falling back to non-media file: {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+            );
+            return Ok(path);
+        }
+    }
+
+    tracing::error!("No files found in directory: {}", dir_path.display());
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "No downloaded file found",
