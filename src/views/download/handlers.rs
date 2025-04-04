@@ -131,131 +131,211 @@ pub fn execute_download(
                     use crate::server::download::handlers::get_download_progress;
                     use crate::views::download::platforms::format_eta;
 
-                    // Use a longer delay between progress checks to reduce request frequency
+                    // Poll interval - check every second
                     let poll_interval = std::time::Duration::from_millis(1000);
 
-                    // Track the last progress value to implement smoothing
-                    let mut last_progress = 0;
+                    // Store time-based progress information
+                    let start_time = std::time::Instant::now();
+
+                    // Define time-based progress stages with fixed percentages
+                    let stages = [
+                        // (time in seconds, max percentage)
+                        (0.0, 0),   // Start at 0%
+                        (1.0, 5),   // After 1s: 5%
+                        (2.0, 10),  // After 2s: 10%
+                        (3.0, 15),  // After 3s: 15%
+                        (4.0, 20),  // After 4s: 20%
+                        (6.0, 25),  // After 6s: 25%
+                        (8.0, 30),  // After 8s: 30%
+                        (10.0, 35), // After 10s: 35%
+                        (12.0, 40), // After 12s: 40%
+                        (14.0, 45), // After 14s: 45%
+                        (16.0, 50), // After 16s: 50%
+                        (18.0, 55), // After 18s: 55%
+                        (20.0, 60), // After 20s: 60%
+                        (23.0, 65), // After 23s: 65%
+                        (26.0, 70), // After 26s: 70%
+                        (30.0, 75), // After 30s: 75%
+                        (35.0, 80), // After 35s: 80%
+                        (40.0, 85), // After 40s: 85%
+                        (45.0, 90), // After 45s: 90%
+                        (50.0, 95), // After 50s: 95%
+                    ];
+
+                    // Track download state
+                    let mut current_progress = 0;
+                    let mut last_status_update = std::time::Instant::now();
                     let mut last_status = String::new();
-                    let mut status_update_timer = std::time::Instant::now();
+                    let mut download_complete = false;
 
-                    // Track when download began for time-based progress
-                    let download_start_time = std::time::Instant::now();
-                    let estimated_completion_seconds = 180.0; // Estimate 3 minutes for full download
+                    // Track when we can assume the download is complete
+                    let mut seen_backend_complete = false;
 
-                    // Count how many times we've seen a high percentage to determine if it's stuck
-                    let mut high_percent_count = 0;
-
-                    // Are we in the "downloading" phase (past initialization)
-                    let mut in_download_phase = false;
-
-                    // Check progress while download is in progress
+                    // Keep polling while download is in progress
                     while download_in_progress_for_polling() {
-                        match get_download_progress(url.clone()).await {
-                            Ok((downloaded, total, eta_seconds, status)) => {
-                                // Mark that we're in download phase if status contains "Downloading"
-                                if status.contains("Downloading") {
-                                    in_download_phase = true;
-                                }
+                        // Get actual progress from server
+                        let backend_info = match get_download_progress(url.clone()).await {
+                            Ok(info) => Some(info),
+                            Err(e) => {
+                                tracing::warn!("Failed to get download progress: {}", e);
+                                None
+                            }
+                        };
 
-                                // Calculate actual progress from backend (0-100)
-                                let backend_progress = if total > 0 {
-                                    ((downloaded as f64 / total as f64) * 100.0) as i32
+                        // Calculate time-based progress first
+                        let elapsed_secs = start_time.elapsed().as_secs_f64();
+
+                        // Find appropriate stage based on elapsed time
+                        let time_progress = {
+                            let mut progress = stages[0].1;
+                            for (stage_time, stage_progress) in stages.iter() {
+                                if elapsed_secs >= *stage_time {
+                                    progress = *stage_progress;
                                 } else {
-                                    downloaded as i32
-                                };
-
-                                // Calculate time-based progress component (0-100)
-                                let elapsed_seconds = download_start_time.elapsed().as_secs_f64();
-                                let time_ratio =
-                                    (elapsed_seconds / estimated_completion_seconds).min(1.0);
-                                let time_progress = (time_ratio * 90.0) as i32; // Max 90% from time
-
-                                // Detect if backend is reporting a large jump (like 7% → 85%)
-                                let is_large_jump = backend_progress > last_progress + 20;
-
-                                // Handle case where backend jumps to high percentage and stalls
-                                if backend_progress > 80 {
-                                    high_percent_count += 1;
-
-                                    // If we've seen high percentages multiple times, it might be stalled
-                                    if high_percent_count > 3 {
-                                        // Calculate a smoother progress based on time passed
-                                        // This will show progress from 80% to 95% based on time
-                                        let stall_progress =
-                                            80 + ((time_ratio * 15.0) as i32).min(15);
-
-                                        // Only update if the smooth progress is increasing
-                                        if stall_progress > last_progress {
-                                            progress_percent_for_polling.set(stall_progress);
-                                            last_progress = stall_progress;
-
-                                            // Update status to indicate "Processing..."
-                                            if status_update_timer.elapsed().as_secs() >= 3 {
-                                                let progress_msg =
-                                                    format!("Processing... {}%", stall_progress);
-                                                status_sig_for_polling.set(Some(progress_msg));
-                                                status_update_timer = std::time::Instant::now();
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    high_percent_count = 0;
-                                }
-
-                                // Calculate smooth progress value based on current state
-                                let smooth_progress = if in_download_phase {
-                                    if is_large_jump {
-                                        // If backend made a big jump, create intermediate values
-                                        // Progress based on time but capped below backend value
-                                        let max_allowed = backend_progress - 5;
-                                        last_progress + 1.min(max_allowed - last_progress)
-                                    } else {
-                                        // Otherwise use the backend value with slight smoothing
-                                        // Never go backward, and never jump more than 2% at once
-                                        let next_progress = backend_progress.max(last_progress);
-                                        last_progress + (next_progress - last_progress).min(2)
-                                    }
-                                } else {
-                                    // During initialization phase, use time-based progress
-                                    // Cap at 20% during initialization
-                                    time_progress.min(20)
-                                };
-
-                                // Only update UI if progress has changed
-                                if smooth_progress > last_progress {
-                                    progress_percent_for_polling.set(smooth_progress);
-                                    last_progress = smooth_progress;
-                                }
-
-                                // Update status if it's significantly different
-                                if status != last_status
-                                    && status_update_timer.elapsed().as_secs() >= 3
-                                {
-                                    // Show percentage in status message
-                                    let status_with_percent = if !status.contains("%") {
-                                        format!("{} ({}%)", status, smooth_progress)
-                                    } else {
-                                        status.clone()
-                                    };
-
-                                    status_sig_for_polling.set(Some(status_with_percent));
-                                    last_status = status;
-                                    status_update_timer = std::time::Instant::now();
-                                }
-
-                                // Format ETA
-                                if eta_seconds > 0 {
-                                    progress_eta_for_polling.set(format_eta(eta_seconds));
+                                    break;
                                 }
                             }
-                            Err(e) => {
-                                // If we can't get progress, just continue - don't update UI
-                                tracing::warn!("Failed to get download progress: {}", e);
+                            progress
+                        };
+
+                        // Check if backend indicates completion
+                        if let Some((downloaded, total, eta_seconds, status)) = backend_info {
+                            // Backend progress calculation (0-100)
+                            let backend_pct = if total > 0 {
+                                ((downloaded as f64 / total as f64) * 100.0) as i32
+                            } else {
+                                downloaded as i32
+                            };
+
+                            // Detect download completion from status or 100% progress
+                            if status.contains("complete")
+                                || status.contains("Complete")
+                                || status.contains("finished")
+                                || status.contains("Finished")
+                                || backend_pct >= 100
+                            {
+                                seen_backend_complete = true;
+                            }
+
+                            // Use the status for messages but ignore backend percentage jumps
+                            if status != last_status && last_status_update.elapsed().as_secs() >= 2
+                            {
+                                // Clean up status message and remove any existing percentages
+                                let clean_status = if status.contains("%") {
+                                    // Remove any existing percentage in the status
+                                    let percent_pos = status.find('%').unwrap_or(status.len());
+                                    if percent_pos > 3 {
+                                        // Find where the percentage starts (usually a digit)
+                                        let mut start_pos = percent_pos - 1;
+                                        while start_pos > 0
+                                            && status
+                                                .chars()
+                                                .nth(start_pos - 1)
+                                                .map_or(false, |c| {
+                                                    c.is_digit(10) || c == ' ' || c == '('
+                                                })
+                                        {
+                                            start_pos -= 1;
+                                        }
+
+                                        // Combine the parts without the percentage
+                                        format!(
+                                            "{}{}",
+                                            status[0..start_pos].trim_end(),
+                                            status[(percent_pos + 1)..].trim_start()
+                                        )
+                                    } else {
+                                        status.clone()
+                                    }
+                                } else {
+                                    status.clone()
+                                };
+
+                                // Add our calculated percentage
+                                let status_msg = if clean_status.is_empty() {
+                                    format!("Downloading... ({}%)", current_progress)
+                                } else {
+                                    format!("{} ({}%)", clean_status, current_progress)
+                                };
+
+                                status_sig_for_polling.set(Some(status_msg));
+                                last_status = status;
+                                last_status_update = std::time::Instant::now();
+                            }
+
+                            // Format ETA if available
+                            if eta_seconds > 0 {
+                                progress_eta_for_polling.set(format_eta(eta_seconds));
                             }
                         }
 
-                        // Delay between progress checks
+                        // If download is complete according to backend, jump to 100%
+                        if seen_backend_complete && !download_complete {
+                            current_progress = 100;
+                            progress_percent_for_polling.set(current_progress);
+                            status_sig_for_polling
+                                .set(Some("Download complete! (100%)".to_string()));
+                            download_complete = true;
+                        }
+                        // Otherwise use time-based progress and update status when needed
+                        else {
+                            // Calculate new progress based on time
+                            let new_time_progress = {
+                                let mut progress = stages[0].1;
+                                for (stage_time, stage_progress) in stages.iter() {
+                                    if elapsed_secs >= *stage_time {
+                                        progress = *stage_progress;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                progress
+                            };
+
+                            // Only update if progress has increased
+                            if new_time_progress > current_progress {
+                                // Update progress
+                                current_progress = new_time_progress;
+                                progress_percent_for_polling.set(current_progress);
+
+                                // For certain milestone percentages, update status message
+                                if (current_progress == 25
+                                    || current_progress == 50
+                                    || current_progress == 75
+                                    || current_progress == 85)
+                                    && last_status_update.elapsed().as_secs() >= 2
+                                {
+                                    let milestone_message = match current_progress {
+                                        25 => "Downloading video... (25%)",
+                                        50 => "Download half complete (50%)",
+                                        75 => "Download almost complete (75%)",
+                                        85 => "Processing download... (85%)",
+                                        _ => "Downloading... ({}%)",
+                                    };
+
+                                    status_sig_for_polling.set(Some(
+                                        milestone_message
+                                            .replace("{}", &current_progress.to_string()),
+                                    ));
+                                    last_status_update = std::time::Instant::now();
+                                }
+                            }
+
+                            // Additional check for stuck downloads - if we've been at a high percentage for too long
+                            if current_progress >= 85
+                                && !seen_backend_complete
+                                && last_status_update.elapsed().as_secs() >= 5
+                            {
+                                // Update status to indicate we're still working
+                                status_sig_for_polling.set(Some(format!(
+                                    "Processing video... ({}%)",
+                                    current_progress
+                                )));
+                                last_status_update = std::time::Instant::now();
+                            }
+                        }
+
+                        // Delay before next poll
                         #[cfg(feature = "web")]
                         {
                             use js_sys::Promise;
