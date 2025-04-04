@@ -44,6 +44,15 @@ time = { version = "0.3", features = [
 url = "2.4.1"
 open = "4.2.0"
 chrono = "0.4.26"
+dioxus-free-icons = { version = "0.9", features = [
+    "font-awesome-solid",
+    "font-awesome-regular",
+    "font-awesome-brands",
+    "hero-icons-outline",
+    "hero-icons-solid",
+    "bootstrap",
+    "feather",
+] }
 
 [features]
 default = ["server"]
