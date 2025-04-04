@@ -30,42 +30,27 @@ pub enum Quality {
 
 // Web-specific blob URL implementation
 #[cfg(feature = "web")]
-fn use_blob_url(data: Option<Vec<u8>>, mime_type: &str) -> Signal<Option<String>> {
-    let mut url = use_signal(|| None::<String>);
+fn create_blob_url(data: &[u8], mime_type: &str) -> Option<String> {
+    let uint8_array = Uint8Array::new_with_length(data.len() as u32);
+    uint8_array.copy_from(data);
 
-    // Create blob URL
-    if let Some(bytes) = data {
-        let uint8_array = Uint8Array::new_with_length(bytes.len() as u32);
-        uint8_array.copy_from(&bytes);
+    let array = Array::new();
+    array.push(&uint8_array.buffer().into());
 
-        let array = Array::new();
-        array.push(&uint8_array.buffer().into());
+    let mut blob_options = BlobPropertyBag::new();
+    blob_options.type_(mime_type);
 
-        let mut blob_options = BlobPropertyBag::new();
-        blob_options.type_(mime_type);
-
-        if let Ok(blob) = Blob::new_with_u8_array_sequence_and_options(&array, &blob_options) {
-            if let Ok(blob_url) = Url::create_object_url_with_blob(&blob) {
-                url.set(Some(blob_url));
-            }
-        }
-    }
-
-    url
+    Blob::new_with_u8_array_sequence_and_options(&array, &blob_options)
+        .ok()
+        .and_then(|blob| Url::create_object_url_with_blob(&blob).ok())
 }
 
 // Non-web fallback implementation using base64
 #[cfg(not(feature = "web"))]
-fn use_blob_url(data: Option<Vec<u8>>, mime_type: &str) -> Signal<Option<String>> {
-    let mut url = use_signal(|| None::<String>);
-
-    if let Some(bytes) = data {
-        let base64_data = STANDARD.encode(&bytes);
-        let data_url = format!("data:{};base64,{}", mime_type, base64_data);
-        url.set(Some(data_url));
-    }
-
-    url
+fn create_blob_url(data: &[u8], mime_type: &str) -> Option<String> {
+    let base64_data = STANDARD.encode(data);
+    let data_url = format!("data:{};base64,{}", mime_type, base64_data);
+    Some(data_url)
 }
 
 // Web-specific download trigger
@@ -110,6 +95,31 @@ pub fn Download() -> Element {
     let mut download_ready = use_signal(|| false);
     let mut loading = use_signal(|| false);
     let mut download_data = use_signal(|| None::<Vec<u8>>);
+    let mut blob_url = use_signal(|| None::<String>);
+
+    // Progress tracking
+    let mut progress_percent = use_signal(|| 0);
+    let mut progress_speed = use_signal(|| String::new());
+    let mut progress_eta = use_signal(|| String::new());
+
+    // Format the ETA in human readable format
+    let format_eta = |seconds: u64| -> String {
+        if seconds == 0 {
+            return "calculating...".to_string();
+        }
+
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        let secs = seconds % 60;
+
+        if hours > 0 {
+            format!("{}h {}m {}s", hours, minutes, secs)
+        } else if minutes > 0 {
+            format!("{}m {}s", minutes, secs)
+        } else {
+            format!("{}s", secs)
+        }
+    };
 
     let handle_download = move |_| {
         if url().trim().is_empty() {
@@ -122,10 +132,15 @@ pub fn Download() -> Element {
             return;
         }
 
+        // Provide immediate feedback
         loading.set(true);
         error.set(None);
-        status.set(Some("Processing download...".into()));
+        status.set(Some("Initializing download...".into()));
         download_ready.set(false);
+        blob_url.set(None);
+        progress_percent.set(5); // Start at 5% immediately for visual feedback
+        progress_eta.set("Calculating...".into());
+        progress_speed.set(String::new());
 
         // Convert format type to string
         let format_str = match format_type() {
@@ -140,32 +155,163 @@ pub fn Download() -> Element {
             Quality::Lowest => "lowest",
         };
 
+        // Start simulated progress
+        let mut sim_progress = progress_percent.clone();
+        let mut status_sig = status.clone();
+        let mut sim_eta = progress_eta.clone();
+        let mut simulating = true;
+
+        // Add timeout protection to prevent UI hanging
+        let timeout_duration = 180; // 3 minutes maximum wait
+        let mut time_waited = 0;
+
         // Execute the download
         let url_clone = url().clone();
         let format_str_clone = format_str.to_string();
         let quality_str_clone = quality_str.to_string();
+        let mut error_signal = error.clone();
 
         spawn(async move {
+            // Add debug status message
+            status_sig.set(Some(format!(
+                "Starting download for {} as {} format, quality: {}",
+                url_clone, format_str_clone, quality_str_clone
+            )));
+
+            // Start timer for timeout protection
+            let start_time = std::time::Instant::now();
+
             let result =
                 download_with_quality(url_clone, format_str_clone, quality_str_clone).await;
+
+            // Show elapsed time in status
+            let elapsed = start_time.elapsed().as_secs_f32();
+            status_sig.set(Some(format!(
+                "Download request completed in {:.1}s",
+                elapsed
+            )));
+
+            // Stop simulation
+            simulating = false;
+
             match result {
                 Ok(data) => {
-                    loading.set(false);
+                    // Set progress to 100% for completion
+                    sim_progress.set(100);
+                    sim_eta.set("0s".into());
+
                     if data.is_empty() {
-                        error.set(Some("Download resulted in empty data. Try again.".into()));
+                        error_signal
+                            .set(Some("Download resulted in empty data. Try again.".into()));
+                        status_sig.set(Some("Download failed - server returned empty data".into()));
                     } else {
-                        download_data.set(Some(data));
-                        status.set(Some(format!(
-                            "Download complete! File size: {:.2} MB",
-                            download_data().as_ref().unwrap().len() as f64 / (1024.0 * 1024.0)
+                        // Process the data based on platform
+                        #[cfg(feature = "web")]
+                        {
+                            // Web platform uses blob URLs
+                            let mime_type = match format_type() {
+                                FormatType::Video => "video/mp4",
+                                FormatType::Audio => "audio/mpeg",
+                            };
+
+                            // Create blob URL for web
+                            if let Some(url_string) = create_blob_url(&data, mime_type) {
+                                blob_url.set(Some(url_string));
+                            }
+                        }
+
+                        status_sig.set(Some(format!(
+                            "Download complete! File size: {:.2} MB. Click button to save.",
+                            data.len() as f64 / (1024.0 * 1024.0)
                         )));
+
+                        download_data.set(Some(data));
                         download_ready.set(true);
                     }
                 }
                 Err(e) => {
-                    loading.set(false);
-                    error.set(Some(format!("Download Failed: {}", e)));
-                    status.set(None);
+                    sim_progress.set(0);
+                    status_sig.set(Some(format!(
+                        "Download failed at: {}",
+                        std::time::Instant::now().elapsed().as_secs_f32()
+                    )));
+                    error_signal.set(Some(format!("Download Failed: {}", e)));
+                }
+            }
+
+            // Always ensure loading is set to false
+            loading.set(false);
+        });
+
+        // Start a simplified, very visible progress indicator that updates frequently
+        spawn(async move {
+            // Start at 5% immediately
+            sim_progress.set(5);
+            status_sig.set(Some("Download started (5%)".to_string()));
+
+            let mut current = 5;
+            let step_size = 5;
+
+            while simulating && current < 85 {
+                // Update every 2 seconds to be very visible
+                #[cfg(feature = "web")]
+                {
+                    use js_sys::Promise;
+                    use wasm_bindgen::prelude::*;
+                    use wasm_bindgen_futures::JsFuture;
+
+                    if let Some(window) = web_sys::window() {
+                        let promise = Promise::new(&mut |resolve, _| {
+                            let closure = Closure::once_into_js(move || {
+                                resolve.call0(&JsValue::NULL).unwrap();
+                            });
+
+                            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                closure.as_ref().unchecked_ref(),
+                                2000,
+                            );
+                        });
+
+                        let _ = JsFuture::from(promise).await;
+                    }
+                }
+
+                #[cfg(not(feature = "web"))]
+                {
+                    use std::thread;
+                    use std::time::Duration;
+                    thread::sleep(Duration::from_secs(2));
+                }
+
+                if !simulating {
+                    break;
+                }
+
+                // Increment progress
+                current += step_size;
+                sim_progress.set(current);
+
+                // Update status with clear progress indicator
+                status_sig.set(Some(format!("Downloading... ({}%)", current)));
+
+                // Update ETA
+                let remaining = (85 - current) / step_size;
+                let eta_seconds = remaining * 2; // 2 seconds per step
+                sim_eta.set(format_eta(eta_seconds));
+
+                // Check for timeout - 3 minute maximum wait
+                time_waited += 2;
+                if time_waited > timeout_duration {
+                    status_sig.set(Some("Download taking longer than expected...".to_string()));
+                    if time_waited > timeout_duration + 60 {
+                        // After 4 minutes total, assume something went wrong
+                        error_signal.set(Some(
+                            "Download timed out. Please try again or check your connection.".into(),
+                        ));
+                        simulating = false;
+                        loading.set(false);
+                        break;
+                    }
                 }
             }
         });
@@ -232,6 +378,44 @@ pub fn Download() -> Element {
         "Download"
     };
 
+    // Define button text before the RSX
+    let save_button_text = if cfg!(feature = "desktop") {
+        "Choose Where to Save"
+    } else {
+        "Save to Device"
+    };
+
+    // Progress bar component with simplified structure - no conditionals inside rsx!
+    let progress_component = if loading() && progress_percent() > 0 {
+        let eta_section = if !progress_eta().is_empty() {
+            rsx! {
+                div { class: "mt-1 text-sm text-gray-400 flex justify-between",
+                    span { "Estimated time: {progress_eta()}" }
+                }
+            }
+        } else {
+            rsx! {}
+        };
+
+        rsx! {
+            div { class: "mt-4",
+                div { class: "mb-2 flex justify-between",
+                    span { class: "text-gray-300", "Downloading..." }
+                    span { class: "text-gray-300", "{progress_percent()}%" }
+                }
+                div { class: "w-full bg-gray-700 rounded-full h-2.5",
+                    div {
+                        class: "bg-blue-600 h-2.5 rounded-full",
+                        style: "width: {progress_percent()}%",
+                    }
+                }
+                {eta_section}
+            }
+        }
+    } else {
+        rsx! {}
+    };
+
     // Quality selection component
     let quality_selection = if matches!(format_type(), FormatType::Video) {
         rsx! {
@@ -284,108 +468,190 @@ pub fn Download() -> Element {
 
     // Download ready component
     let download_ready_component = if download_ready() {
-        if let Some(data) = download_data() {
-            let mime_type = match format_type() {
-                FormatType::Video => "video/mp4",
-                FormatType::Audio => "audio/mpeg",
-            };
+        let mime_type = match format_type() {
+            FormatType::Video => "video/mp4",
+            FormatType::Audio => "audio/mpeg",
+        };
 
-            // Get the extension based on the chosen format
-            let extension = match format_type() {
-                FormatType::Video => "mp4",
-                FormatType::Audio => "mp3",
-            };
+        // Get the extension based on the chosen format
+        let extension = match format_type() {
+            FormatType::Video => "mp4",
+            FormatType::Audio => "mp3",
+        };
 
-            // Ensure the filename has the correct extension
-            let download_filename = if filename().ends_with(extension) {
-                filename().clone()
+        // Ensure the filename has the correct extension
+        let download_filename = if filename().ends_with(extension) {
+            filename().clone()
+        } else {
+            // Remove any existing extension and add the correct one
+            let filename_str = filename().clone();
+            let base_name = if filename_str.contains('.') {
+                let parts: Vec<&str> = filename_str.split('.').collect();
+                parts[0].to_string()
             } else {
-                // Remove any existing extension and add the correct one
-                let filename_str = filename().clone(); // Store in a local variable first
-                let base_name = if filename_str.contains('.') {
-                    let parts: Vec<&str> = filename_str.split('.').collect();
-                    parts[0].to_string()
-                } else {
-                    filename_str
-                };
-                format!("{}.{}", base_name, extension)
+                filename_str
             };
+            format!("{}.{}", base_name, extension)
+        };
 
-            // Create a blob URL for the binary data
-            let blob_url = use_blob_url(Some(data.clone()), mime_type);
+        // Platform-specific download handlers
+        #[cfg(feature = "web")]
+        let download_handler = move |_| {
+            if let Some(url) = blob_url() {
+                trigger_download(&url, &download_filename);
+            }
+        };
 
-            // Handler for download button
-            let download_handler = move |_| {
-                if let Some(url) = blob_url() {
-                    trigger_download(&url, &download_filename);
-                }
-            };
+        #[cfg(feature = "desktop")]
+        let download_handler = {
+            let data_clone = download_data.clone();
+            let download_filename_clone = download_filename.clone();
+            let mut status_clone = status.clone();
+            let mut error_clone = error.clone();
 
-            rsx! {
-                div { class: "mt-6 p-6 bg-green-900 bg-opacity-20 rounded-lg border border-green-700",
-                    p { class: "text-green-400 font-medium mb-4",
-                        "✓ Your file is ready to download!"
-                    }
+            move |_| {
+                if let Some(data) = data_clone() {
+                    // Create a default download path in the user's downloads folder
+                    let home_dir = dirs::home_dir();
+                    let downloads_dir = home_dir.and_then(|dir| Some(dir.join("Downloads")));
 
-                    // Separate components for the two format types
-                    match format_type() {
-                        FormatType::Video => rsx! {
-                            p { class: "text-gray-300 mb-4",
-                                "File format: "
-                                span { class: "font-bold", "Video (MP4)" }
+                    if let Some(downloads_path) = downloads_dir {
+                        // Create the full path with filename
+                        let file_path = downloads_path.join(&download_filename_clone);
+
+                        // Try to save the file directly
+                        match std::fs::write(&file_path, &data) {
+                            Ok(_) => {
+                                let path_str = file_path.to_string_lossy().to_string();
+                                status_clone
+                                    .set(Some(format!("File saved successfully to {}", path_str)));
+                                error_clone.set(None);
                             }
-                        },
-                        FormatType::Audio => rsx! {
-                            p { class: "text-gray-300 mb-4",
-                                "File format: "
-                                span { class: "font-bold", "Audio (MP3)" }
-                            }
-                        },
-                    }
-
-                    div { class: "text-center",
-                        button {
-                            class: "inline-block w-full sm:w-auto px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium text-white transition-colors duration-200",
-                            onclick: download_handler,
-                            "Save to Device"
-                        }
-                    }
-
-                    // Also separate components for the preview
-                    match format_type() {
-                        FormatType::Video => {
-                            if let Some(url) = blob_url() {
-                                rsx! {
-                                    div { class: "mt-4 pt-4 border-t border-green-700",
-                                        p { class: "text-gray-300 mb-2", "Preview:" }
-                                        video { class: "w-full max-h-96 rounded", controls: true, src: "{url}" }
-                                    }
-                                }
-                            } else {
-                                rsx! {
-                                    div { "Loading preview..." }
-                                }
+                            Err(e) => {
+                                error_clone.set(Some(format!("Failed to save file: {}", e)));
+                                status_clone.set(Some(
+                                    "Error saving file. Check permissions and try again."
+                                        .to_string(),
+                                ));
                             }
                         }
-                        FormatType::Audio => {
-                            if let Some(url) = blob_url() {
-                                rsx! {
-                                    div { class: "mt-4 pt-4 border-t border-green-700",
-                                        p { class: "text-gray-300 mb-2", "Preview:" }
-                                        audio { class: "w-full", controls: true, src: "{url}" }
-                                    }
-                                }
-                            } else {
-                                rsx! {
-                                    div { "Loading preview..." }
-                                }
+                    } else {
+                        // Fall back to a temporary directory if we can't find Downloads
+                        let temp_dir = std::env::temp_dir();
+                        let file_path = temp_dir.join(&download_filename_clone);
+
+                        match std::fs::write(&file_path, &data) {
+                            Ok(_) => {
+                                let path_str = file_path.to_string_lossy().to_string();
+                                status_clone.set(Some(format!(
+                                    "File saved to temporary location: {}",
+                                    path_str
+                                )));
+                                error_clone.set(None);
+                            }
+                            Err(e) => {
+                                error_clone.set(Some(format!("Failed to save file: {}", e)));
+                                status_clone.set(Some(
+                                    "Error saving file. Check permissions and try again."
+                                        .to_string(),
+                                ));
                             }
                         }
                     }
                 }
             }
+        };
+
+        #[cfg(not(any(feature = "web", feature = "desktop")))]
+        let download_handler = move |_| {
+            // Fallback for other platforms
+            if let Some(url) = blob_url() {
+                trigger_download(&url, &download_filename);
+            }
+        };
+
+        // Generate the preview section based on platform
+        let preview_section = if cfg!(feature = "web") {
+            match format_type() {
+                FormatType::Video => {
+                    if let Some(url) = blob_url() {
+                        rsx! {
+                            div { class: "mt-4 pt-4 border-t border-green-700",
+                                p { class: "text-gray-300 mb-2", "Preview:" }
+                                video {
+                                    class: "w-full max-h-96 rounded",
+                                    controls: true,
+                                    src: "{url}",
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            div { "Loading preview..." }
+                        }
+                    }
+                }
+                FormatType::Audio => {
+                    if let Some(url) = blob_url() {
+                        rsx! {
+                            div { class: "mt-4 pt-4 border-t border-green-700",
+                                p { class: "text-gray-300 mb-2", "Preview:" }
+                                audio {
+                                    class: "w-full",
+                                    controls: true,
+                                    src: "{url}",
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            div { "Loading preview..." }
+                        }
+                    }
+                }
+            }
+        } else if cfg!(feature = "desktop") {
+            // Desktop specific message
+            rsx! {
+                div { class: "mt-4 pt-4 border-t border-green-700 text-gray-300",
+                    p { "Click the button above to choose where to save your file." }
+                }
+            }
         } else {
             rsx! {}
+        };
+
+        rsx! {
+            div { class: "mt-6 p-6 bg-green-900 bg-opacity-20 rounded-lg border border-green-700",
+                p { class: "text-green-400 font-medium mb-4", "✓ Your file is ready to download!" }
+
+                // Separate components for the two format types
+                match format_type() {
+                    FormatType::Video => rsx! {
+                        p { class: "text-gray-300 mb-4",
+                            "File format: "
+                            span { class: "font-bold", "Video (MP4)" }
+                        }
+                    },
+                    FormatType::Audio => rsx! {
+                        p { class: "text-gray-300 mb-4",
+                            "File format: "
+                            span { class: "font-bold", "Audio (MP3)" }
+                        }
+                    },
+                }
+
+                div { class: "text-center",
+                    button {
+                        class: "inline-block w-full sm:w-auto px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium text-white transition-colors duration-200",
+                        onclick: download_handler,
+                        "{save_button_text}"
+                    }
+                }
+
+                // Include the preview section
+                {preview_section}
+            }
         }
     } else {
         rsx! {}
@@ -450,6 +716,9 @@ pub fn Download() -> Element {
                             "{button_text}"
                         }
                     }
+
+                    // Progress bar
+                    {progress_component}
 
                     // Error messages
                     {error_message}

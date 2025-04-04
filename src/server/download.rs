@@ -11,6 +11,28 @@ use tracing;
 #[cfg(feature = "server")]
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
 
+/// Structure to track download progress
+#[cfg(feature = "server")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    eta_seconds: u64,
+    status: String,
+}
+
+#[cfg(feature = "server")]
+impl Default for DownloadProgress {
+    fn default() -> Self {
+        Self {
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            eta_seconds: 0,
+            status: "Initializing...".to_string(),
+        }
+    }
+}
+
 /// Check if yt-dlp is installed and download it if not found
 #[cfg(feature = "server")]
 async fn ensure_yt_dlp_available() -> Result<PathBuf, ServerFnError<NoCustomError>> {
@@ -90,10 +112,53 @@ pub async fn echo(input: String) -> Result<String, ServerFnError<NoCustomError>>
     Ok(input)
 }
 
+/// Get progress information for an ongoing download
+#[server(GetDownloadProgress)]
+pub async fn get_download_progress(
+    url: String,
+) -> Result<(u64, u64, u64, String), ServerFnError<NoCustomError>> {
+    tracing::info!("Checking progress for URL: {}", url);
+
+    #[cfg(feature = "server")]
+    {
+        // Create a unique ID based on the URL to track this specific download
+        let progress_id = format!("download_{}", url.len());
+        let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
+
+        if progress_file.exists() {
+            match fs::read_to_string(&progress_file).await {
+                Ok(content) => match serde_json::from_str::<DownloadProgress>(&content) {
+                    Ok(progress) => {
+                        return Ok((
+                            progress.downloaded_bytes,
+                            progress.total_bytes,
+                            progress.eta_seconds,
+                            progress.status,
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse progress data: {}", e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to read progress file: {}", e);
+                }
+            }
+        }
+
+        // Return default values if no progress is found
+        Ok((0, 0, 0, "Initializing download...".to_string()))
+    }
+
+    #[cfg(not(feature = "server"))]
+    Err(ServerFnError::<NoCustomError>::ServerError(
+        "Server feature not enabled".to_string(),
+    ))
+}
+
 /// Download video with highest quality
 #[server(Download)]
 pub async fn download_video(url: String) -> Result<Vec<u8>, ServerFnError<NoCustomError>> {
-    tracing::info!("Download request for URL: {}", url);
     download_with_quality(url, "video".to_string(), "highest".to_string()).await
 }
 
@@ -120,55 +185,34 @@ pub async fn download_with_options(
 pub async fn get_video_info(url: String) -> Result<String, ServerFnError<NoCustomError>> {
     tracing::info!("Getting video info for: {}", url);
 
-    // Ensure yt-dlp is available
-    let yt_dlp_path = match ensure_yt_dlp_available().await {
-        Ok(path) => path,
-        Err(e) => {
-            tracing::error!("Could not find or download yt-dlp: {}", e);
-            return Err(e);
-        }
-    };
+    #[cfg(feature = "server")]
+    {
+        let output = match YoutubeDl::new(url).run_async().await.map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!("Error fetching video info: {}", e))
+        })? {
+            YoutubeDlOutput::SingleVideo(video) => video,
+            YoutubeDlOutput::Playlist(_) => {
+                return Err(ServerFnError::<NoCustomError>::ServerError(
+                    "URL points to a playlist, not a single video".to_string(),
+                ));
+            }
+        };
 
-    let mut youtube_dl = YoutubeDl::new(url);
+        // Convert the video info to JSON
+        let json_str = serde_json::to_string(&output).map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!(
+                "Error serializing video info: {}",
+                e
+            ))
+        })?;
 
-    // Handle both full paths and PATH-based commands
-    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
-        // For full paths, use the path directly
-        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
-        youtube_dl.youtube_dl_path(&yt_dlp_path);
-    } else {
-        // For commands in PATH, just use the command name
-        tracing::info!("Using yt-dlp from PATH");
-        youtube_dl.youtube_dl_path("yt-dlp");
+        Ok(json_str)
     }
 
-    let output = match youtube_dl.run_async().await.map_err(|e| {
-        tracing::error!("Error fetching video info: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!("Error fetching video info: {}", e))
-    })? {
-        YoutubeDlOutput::SingleVideo(video) => {
-            tracing::info!(
-                "Successfully fetched info for video: {}",
-                video.title.as_deref().unwrap_or("Unknown")
-            );
-            video
-        }
-        YoutubeDlOutput::Playlist(_) => {
-            tracing::info!("URL points to a playlist, not a single video");
-            return Err(ServerFnError::<NoCustomError>::ServerError(
-                "URL points to a playlist, not a single video".to_string(),
-            ));
-        }
-    };
-
-    // Convert the video info to JSON
-    let json_str = serde_json::to_string(&output).map_err(|e| {
-        tracing::error!("Error serializing video info: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!("Error serializing video info: {}", e))
-    })?;
-
-    tracing::info!("Successfully processed video info");
-    Ok(json_str)
+    #[cfg(not(feature = "server"))]
+    Err(ServerFnError::<NoCustomError>::ServerError(
+        "Server feature not enabled".to_string(),
+    ))
 }
 
 /// Search YouTube videos
@@ -176,48 +220,129 @@ pub async fn get_video_info(url: String) -> Result<String, ServerFnError<NoCusto
 pub async fn search_youtube(query: String) -> Result<String, ServerFnError<NoCustomError>> {
     tracing::info!("Searching YouTube for: {}", query);
 
-    // Ensure yt-dlp is available
-    let yt_dlp_path = match ensure_yt_dlp_available().await {
-        Ok(path) => path,
-        Err(e) => {
-            tracing::error!("Could not find or download yt-dlp: {}", e);
-            return Err(e);
-        }
-    };
+    #[cfg(feature = "server")]
+    {
+        // Create search options for YouTube
+        let search_options = youtube_dl::SearchOptions::youtube(query).with_count(10); // Get 10 results
 
-    // Create search options for YouTube
-    let search_options = youtube_dl::SearchOptions::youtube(query).with_count(10); // Get 10 results
+        // Run the search
+        let output = YoutubeDl::search_for(&search_options)
+            .run_async()
+            .await
+            .map_err(|e| {
+                ServerFnError::<NoCustomError>::ServerError(format!("Error searching: {}", e))
+            })?;
 
-    // Run the search with proper path handling
-    let mut youtube_dl = YoutubeDl::search_for(&search_options);
+        // Convert the output to JSON
+        let json_str = serde_json::to_string(&output).map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!(
+                "Error serializing search results: {}",
+                e
+            ))
+        })?;
 
-    // Handle both full paths and PATH-based commands
-    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
-        // For full paths, use the path directly
-        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
-        youtube_dl.youtube_dl_path(&yt_dlp_path);
-    } else {
-        // For commands in PATH, just use the command name
-        tracing::info!("Using yt-dlp from PATH");
-        youtube_dl.youtube_dl_path("yt-dlp");
+        Ok(json_str)
     }
 
-    let output = youtube_dl.run_async().await.map_err(|e| {
-        tracing::error!("Error searching: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!("Error searching: {}", e))
-    })?;
+    #[cfg(not(feature = "server"))]
+    Err(ServerFnError::<NoCustomError>::ServerError(
+        "Server feature not enabled".to_string(),
+    ))
+}
 
-    // Convert the output to JSON
-    let json_str = serde_json::to_string(&output).map_err(|e| {
-        tracing::error!("Error serializing search results: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Error serializing search results: {}",
-            e
-        ))
-    })?;
+#[cfg(feature = "server")]
+fn parse_progress_line(line: &str) -> Option<DownloadProgress> {
+    let mut progress = DownloadProgress::default();
 
-    tracing::info!("Search complete, found results");
-    Ok(json_str)
+    // Check if the line contains progress information
+    if line.starts_with("[download]") && line.contains("%") {
+        // Parse percentage
+        if let Some(percent_idx) = line.find('%') {
+            if let Some(percent_start) = line[..percent_idx].rfind(' ') {
+                if let Ok(percent) = line[percent_start + 1..percent_idx].trim().parse::<f64>() {
+                    progress.status = format!("Downloading: {:.1}%", percent);
+
+                    // Try to parse the file size
+                    if let Some(of_idx) = line.find(" of ") {
+                        if let Some(size_end) = line[of_idx + 4..].find(' ') {
+                            let size_str = line[of_idx + 4..of_idx + 4 + size_end].trim();
+                            progress.total_bytes = parse_size(size_str).unwrap_or(0);
+                            progress.downloaded_bytes =
+                                ((percent / 100.0) * progress.total_bytes as f64) as u64;
+                        }
+                    }
+
+                    // Try to parse ETA
+                    if let Some(eta_idx) = line.find(" ETA ") {
+                        let eta_str = line[eta_idx + 5..].trim();
+                        progress.eta_seconds = parse_eta(eta_str).unwrap_or(0);
+                    }
+
+                    return Some(progress);
+                }
+            }
+        }
+    } else if line.contains("Merger") || line.contains("ffmpeg") {
+        progress.status = "Processing video...".to_string();
+        progress.downloaded_bytes = progress.total_bytes; // Assume download is complete
+        return Some(progress);
+    }
+
+    None
+}
+
+#[cfg(feature = "server")]
+fn parse_size(size_str: &str) -> Option<u64> {
+    let mut num_str = String::new();
+    let mut unit_str = String::new();
+
+    for c in size_str.chars() {
+        if c.is_digit(10) || c == '.' {
+            num_str.push(c);
+        } else if c.is_alphabetic() {
+            unit_str.push(c);
+        }
+    }
+
+    match num_str.parse::<f64>() {
+        Ok(num) => match unit_str.to_uppercase().as_str() {
+            "B" => Some(num as u64),
+            "KB" | "KIB" => Some((num * 1024.0) as u64),
+            "MB" | "MIB" => Some((num * 1024.0 * 1024.0) as u64),
+            "GB" | "GIB" => Some((num * 1024.0 * 1024.0 * 1024.0) as u64),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+#[cfg(feature = "server")]
+fn parse_eta(eta_str: &str) -> Option<u64> {
+    let parts: Vec<&str> = eta_str.split(':').collect();
+
+    match parts.len() {
+        2 => {
+            // MM:SS format
+            match (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                (Ok(minutes), Ok(seconds)) => Some(minutes * 60 + seconds),
+                _ => None,
+            }
+        }
+        3 => {
+            // HH:MM:SS format
+            match (
+                parts[0].parse::<u64>(),
+                parts[1].parse::<u64>(),
+                parts[2].parse::<u64>(),
+            ) {
+                (Ok(hours), Ok(minutes), Ok(seconds)) => {
+                    Some(hours * 3600 + minutes * 60 + seconds)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Download with specific format_type and quality
@@ -236,289 +361,349 @@ pub async fn download_with_quality(
 
     // Validate URL format
     if !url.contains("youtube.com/watch?v=") && !url.contains("youtu.be/") {
-        tracing::error!("Invalid YouTube URL provided: {}", url);
         return Err(ServerFnError::<NoCustomError>::ServerError(
             "Invalid YouTube URL. Please provide a valid YouTube video URL.".to_string(),
         ));
     }
 
-    // Ensure yt-dlp is available
-    let yt_dlp_path = match ensure_yt_dlp_available().await {
-        Ok(path) => {
-            tracing::info!("Using yt-dlp at path: {:?}", path);
-            path
-        }
-        Err(e) => {
-            tracing::error!("Could not find or download yt-dlp: {}", e);
-            let message = format!("yt-dlp executable not found. Please ensure that yt-dlp is installed \
-                on your system and is in your PATH. You can install it with: \
-                macOS: 'brew install yt-dlp' or Linux: 'sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp'");
-            return Err(ServerFnError::<NoCustomError>::ServerError(message));
-        }
-    };
-
-    // Check if the file exists before proceeding, but only if it's a full path
-    // If it's just "yt-dlp", it means it was found in PATH and we don't need to check
-    if !yt_dlp_path.to_string_lossy().contains("/") && !yt_dlp_path.to_string_lossy().contains("\\")
+    #[cfg(feature = "server")]
     {
-        tracing::info!("Using yt-dlp from PATH, skipping file existence check");
-    } else if !yt_dlp_path.exists() {
-        let path_str = yt_dlp_path.display().to_string();
-        tracing::error!("yt-dlp path points to non-existent file: {}", path_str);
-        return Err(ServerFnError::<NoCustomError>::ServerError(format!(
-            "yt-dlp executable not found at {}. Please install yt-dlp",
-            path_str
-        )));
-    }
+        // Create temporary directory for the download
+        let temp_dir = std::env::temp_dir().join(format!("youtube_dl_{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!(
+                "Failed to create temp directory: {}",
+                e
+            ))
+        })?;
 
-    // Create temporary directory for the download
-    let temp_dir = std::env::temp_dir().join(format!("youtube_dl_{}", std::process::id()));
+        let temp_dir_path = temp_dir.to_string_lossy().to_string();
+        tracing::info!("Creating temp directory at {:?}", temp_dir_path);
 
-    tracing::info!("Creating temp directory at {:?}", temp_dir);
-    std::fs::create_dir_all(&temp_dir).map_err(|e| {
-        tracing::error!("Failed to create temp directory: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Failed to create temp directory: {}",
-            e
-        ))
-    })?;
+        // Generate a unique ID for this download
+        let progress_id = format!("download_{}", url.len());
+        let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
 
-    let temp_dir_path = temp_dir.to_string_lossy().to_string();
+        // Initialize progress file
+        let initial_progress = DownloadProgress::default();
+        if let Ok(json) = serde_json::to_string(&initial_progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
 
-    // Try to resolve the video URL first to get some basic info
-    let video_info = {
+        // Configure youtube-dl options based on format type and quality
         let mut youtube_dl = YoutubeDl::new(&url);
 
-        // Handle both full paths and PATH-based commands
-        if yt_dlp_path.to_string_lossy().contains("/")
-            || yt_dlp_path.to_string_lossy().contains("\\")
-        {
-            // For full paths, use the path directly
-            youtube_dl.youtube_dl_path(&yt_dlp_path);
-        } else {
-            // For commands in PATH, just use the command name
-            youtube_dl.youtube_dl_path("yt-dlp");
-        }
+        // Set output directory
+        youtube_dl.output_directory(&temp_dir_path);
 
-        match youtube_dl.run_async().await {
-            Ok(output) => match output {
-                YoutubeDlOutput::SingleVideo(video) => Some(video),
-                _ => None,
-            },
-            Err(e) => {
-                tracing::warn!("Could not get video info before download: {}", e);
-                None
-            }
-        }
-    };
+        // Add verbose output for better progress information
+        youtube_dl.extra_arg("--verbose");
+        youtube_dl.socket_timeout("60");
 
-    if let Some(info) = &video_info {
-        tracing::info!(
-            "Will download: {} ({})",
-            info.title.as_deref().unwrap_or("Unknown title"),
-            info.duration
-                .as_ref()
-                .map(|d| format!("{:?}", d))
-                .unwrap_or_else(|| "Unknown duration".to_string())
-        );
-    }
+        // Get video info first to determine estimated size and title
+        let mut video_title = String::from("Unknown");
+        let mut estimated_size: u64 = 0;
 
-    // Configure youtube-dl options based on format type and quality
-    let mut youtube_dl = YoutubeDl::new(&url);
+        match youtube_dl.clone().socket_timeout("30").run_async().await {
+            Ok(YoutubeDlOutput::SingleVideo(video)) => {
+                if let Some(title) = &video.title {
+                    video_title = title.clone();
+                    tracing::info!("Will download: {:?}", title);
 
-    // Set yt-dlp path and output directory
-    // Handle both full paths and PATH-based commands
-    if yt_dlp_path.to_string_lossy().contains("/") || yt_dlp_path.to_string_lossy().contains("\\") {
-        // For full paths, use the path directly
-        tracing::info!("Using full path for yt-dlp: {:?}", yt_dlp_path);
-        youtube_dl.youtube_dl_path(&yt_dlp_path);
-    } else {
-        // For commands in PATH, just use the command name
-        tracing::info!("Using yt-dlp from PATH");
-        youtube_dl.youtube_dl_path("yt-dlp");
-    }
-    youtube_dl.output_directory(&temp_dir_path);
-
-    // Add timeout to prevent hangs
-    youtube_dl.socket_timeout("30");
-    youtube_dl.process_timeout(std::time::Duration::from_secs(300)); // 5 minute timeout
-
-    // Configure format selection based on format_type and quality
-    tracing::info!("Configuring download format");
-    match format_type.to_lowercase().as_str() {
-        "audio" => {
-            youtube_dl.extract_audio(true);
-            youtube_dl.format("bestaudio");
-            youtube_dl.output_template("audio");
-            tracing::info!("Set up audio-only download with best quality");
-        }
-        "video" => {
-            // Configure video quality
-            match quality.to_lowercase().as_str() {
-                "lowest" => {
-                    youtube_dl.format("worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]");
-                    tracing::info!("Set up video download with lowest quality");
+                    // Update progress file with title
+                    let mut progress = initial_progress.clone();
+                    progress.status = format!("Preparing to download: {}", title);
+                    if let Ok(json) = serde_json::to_string(&progress) {
+                        let _ = std::fs::write(&progress_file, json);
+                    }
                 }
-                "highest" | _ => {
-                    youtube_dl.format("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
-                    tracing::info!("Set up video download with highest quality");
-                }
-            }
-            youtube_dl.output_template("video");
-        }
-        _ => {
-            tracing::error!("Invalid format type: {}", format_type);
-            return Err(ServerFnError::<NoCustomError>::ServerError(
-                "Invalid format type. Please specify 'audio' or 'video'.".to_string(),
-            ));
-        }
-    }
 
-    // Execute the download
-    tracing::info!("Starting download with yt-dlp...");
-
-    match youtube_dl.download_to_async(&temp_dir).await {
-        Ok(()) => tracing::info!("Download completed successfully"),
-        Err(e) => {
-            tracing::error!("Download error: {}", e);
-
-            // If we have a youtube-dl error with exit code, log the detailed stderr
-            if let youtube_dl::Error::ExitCode { code, stderr } = &e {
-                tracing::error!("yt-dlp exit code {}, stderr: {}", code, stderr);
-            }
-
-            // Try to clean up the temp directory
-            let _ = fs::remove_dir_all(&temp_dir).await;
-            return Err(ServerFnError::<NoCustomError>::ServerError(format!(
-                "Download failed: {}",
-                e
-            )));
-        }
-    }
-
-    // Find the downloaded file
-    tracing::info!("Looking for downloaded file in {:?}", temp_dir);
-    let downloaded_file = find_downloaded_file(&temp_dir).await.map_err(|e| {
-        tracing::error!("Failed to find downloaded file: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Failed to find downloaded file: {}",
-            e
-        ))
-    })?;
-
-    tracing::info!("Found downloaded file: {}", downloaded_file.display());
-
-    // Read the file content
-    tracing::info!("Reading file content");
-    let content = fs::read(&downloaded_file).await.map_err(|e| {
-        tracing::error!("Failed to read downloaded file: {}", e);
-        ServerFnError::<NoCustomError>::ServerError(format!(
-            "Failed to read downloaded file: {}",
-            e
-        ))
-    })?;
-
-    // Clean up the temp directory
-    tracing::info!("Cleaning up temporary directory");
-    if let Err(e) = fs::remove_dir_all(&temp_dir).await {
-        tracing::warn!("Failed to clean up temp directory: {}", e);
-    }
-
-    tracing::info!("Downloaded {} bytes successfully", content.len());
-    Ok(content)
-}
-
-#[cfg(feature = "server")]
-async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<PathBuf> {
-    let dir_path = dir.as_ref();
-    let dir_str = dir_path.to_string_lossy();
-
-    tracing::info!("Scanning directory {} for downloaded files", dir_str);
-
-    // Check if the directory exists
-    if !dir_path.exists() {
-        tracing::error!("Download directory does not exist: {}", dir_str);
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Download directory does not exist: {}", dir_str),
-        ));
-    }
-
-    // Check if it's actually a directory
-    if !dir_path.is_dir() {
-        tracing::error!("Path is not a directory: {}", dir_str);
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Path is not a directory: {}", dir_str),
-        ));
-    }
-
-    // Collect all entries first to avoid the 'continue' in the while loop condition issue
-    let entries = match fs::read_dir(dir_path).await {
-        Ok(mut entries) => {
-            let mut result: Vec<fs::DirEntry> = Vec::new();
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                result.push(entry);
-            }
-            result
-        }
-        Err(e) => {
-            tracing::error!("Failed to read directory {}: {}", dir_str, e);
-            return Err(e);
-        }
-    };
-
-    // First look for files
-    for entry in &entries {
-        let path = entry.path();
-        if path.is_file() {
-            let filename = path.file_name().unwrap_or_default().to_string_lossy();
-            let size = match fs::metadata(&path).await {
-                Ok(meta) => meta.len(),
-                Err(_) => 0,
-            };
-            tracing::info!("Found file: {} ({} bytes)", filename, size);
-            return Ok(path);
-        }
-    }
-
-    // If no files found, try subdirectories
-    for entry in entries {
-        let path = entry.path();
-        if path.is_dir() {
-            tracing::info!("Checking subdirectory: {}", path.display());
-            match fs::read_dir(&path).await {
-                Ok(mut subentries) => {
-                    // Check for any files in this subdirectory
-                    while let Ok(Some(subentry)) = subentries.next_entry().await {
-                        let subpath = subentry.path();
-                        if subpath.is_file() {
-                            let filename =
-                                subpath.file_name().unwrap_or_default().to_string_lossy();
-                            let size = match fs::metadata(&subpath).await {
-                                Ok(meta) => meta.len(),
-                                Err(_) => 0,
-                            };
-                            tracing::info!(
-                                "Found file in subdirectory: {} ({} bytes)",
-                                filename,
-                                size
-                            );
-                            return Ok(subpath);
+                // Try to get filesize from formats
+                if let Some(formats) = video.formats {
+                    for format in formats {
+                        if let Some(size) = format.filesize {
+                            // Make sure both values are the same type (u64)
+                            let size_u64 = size as u64;
+                            if size_u64 > estimated_size {
+                                estimated_size = size_u64;
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to read subdirectory {}: {}", path.display(), e);
+            }
+            _ => {}
+        }
+
+        tracing::info!("Configuring download format");
+        // Configure format selection based on format_type and quality
+        match format_type.to_lowercase().as_str() {
+            "audio" => {
+                youtube_dl.extract_audio(true);
+                youtube_dl.format("bestaudio");
+                youtube_dl.output_template("audio");
+                tracing::info!("Set up audio download with highest quality");
+            }
+            "video" => {
+                // Configure video quality
+                match quality.to_lowercase().as_str() {
+                    "lowest" => {
+                        youtube_dl.format("worstvideo[ext=mp4]+worstaudio[ext=m4a]/worst[ext=mp4]");
+                        tracing::info!("Set up video download with lowest quality");
+                    }
+                    "medium" => {
+                        youtube_dl.format("bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]");
+                        tracing::info!("Set up video download with medium quality (720p)");
+                    }
+                    "highest" | _ => {
+                        youtube_dl.format("bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]");
+                        tracing::info!("Set up video download with highest quality");
+                    }
+                }
+                youtube_dl.output_template("video");
+            }
+            _ => {
+                return Err(ServerFnError::<NoCustomError>::ServerError(
+                    "Invalid format type. Please specify 'audio' or 'video'.".to_string(),
+                ));
+            }
+        }
+
+        // Launch a separate task to monitor the download progress by checking file size
+        let progress_file_clone = progress_file.clone();
+        let temp_dir_clone = temp_dir.clone();
+        let video_title_clone = video_title.clone();
+        let estimated_size_clone = estimated_size;
+
+        tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+            let mut last_size: u64 = 0;
+            let mut last_update = std::time::Instant::now();
+            let mut stalled_counter = 0;
+
+            loop {
+                // Check every 1 second
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                // Check if the temp directory still exists (download might have finished)
+                if !temp_dir_clone.exists() {
+                    break;
+                }
+
+                // Calculate current size of all files in the directory
+                let mut current_size: u64 = 0;
+                let mut is_processing = false;
+
+                // Read directory to find all files
+                if let Ok(mut entries) = fs::read_dir(&temp_dir_clone).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if path.is_file() {
+                            // Check if file is a temporary/part file
+                            let filename = path.file_name().unwrap_or_default().to_string_lossy();
+
+                            // Check if we're in the processing phase (ffmpeg merging, etc)
+                            if filename.contains(".mkv")
+                                || filename.contains(".mp4")
+                                || filename.contains(".webm")
+                                || filename.contains(".mp3")
+                            {
+                                is_processing = true;
+                            }
+
+                            if let Ok(metadata) = fs::metadata(&path).await {
+                                current_size += metadata.len();
+                            }
+                        }
+                    }
+                } else {
+                    // Directory might be gone or inaccessible
+                    break;
+                }
+
+                // Update progress
+                if last_update.elapsed().as_millis() > 500 {
+                    // Update at most twice per second
+                    // Calculate progress metrics
+                    let elapsed_secs = start_time.elapsed().as_secs();
+                    let download_speed = if elapsed_secs > 0 {
+                        current_size as f64 / elapsed_secs as f64
+                    } else {
+                        0.0
+                    };
+
+                    let mut progress = DownloadProgress::default();
+
+                    if is_processing {
+                        // If we're processing (merging video and audio), set a specific status
+                        progress.status = "Processing video...".to_string();
+                        // Set to 99% to indicate almost done
+                        progress.downloaded_bytes = 99;
+                        progress.total_bytes = 100;
+                        progress.eta_seconds = 0;
+                    } else if current_size > 0 {
+                        // Normal download progress
+                        if estimated_size_clone > 0 {
+                            // We have an estimated total size
+                            progress.downloaded_bytes = current_size;
+                            progress.total_bytes = estimated_size_clone;
+
+                            // Calculate ETA if we have a non-zero download speed
+                            if download_speed > 0.0 {
+                                let remaining_bytes = if estimated_size_clone > current_size {
+                                    estimated_size_clone - current_size
+                                } else {
+                                    0
+                                };
+                                let eta_secs = (remaining_bytes as f64 / download_speed) as u64;
+                                progress.eta_seconds = eta_secs;
+                            }
+
+                            // Calculate percentage
+                            let percent =
+                                (current_size as f64 / estimated_size_clone as f64 * 100.0) as u64;
+                            progress.status =
+                                format!("Downloading: {}% of {}", percent, video_title_clone);
+                        } else {
+                            // No estimated size, just show downloaded size
+                            progress.downloaded_bytes = current_size;
+                            // Set an arbitrary total that's higher than current to show progress
+                            progress.total_bytes = current_size.saturating_add(10 * 1024 * 1024); // Add 10MB
+                            progress.status = format!(
+                                "Downloading: {:.2} MB of {}",
+                                current_size as f64 / (1024.0 * 1024.0),
+                                video_title_clone
+                            );
+                        }
+
+                        // Check if download is stalled
+                        if current_size == last_size {
+                            stalled_counter += 1;
+                            // After 10 seconds with no progress, indicate stalled download
+                            if stalled_counter >= 10 {
+                                progress.status = format!(
+                                    "Download stalled at {:.2} MB...",
+                                    current_size as f64 / (1024.0 * 1024.0)
+                                );
+                            }
+                        } else {
+                            stalled_counter = 0;
+                            last_size = current_size;
+                        }
+                    } else {
+                        // No progress yet
+                        progress.status = format!("Starting download of {}...", video_title_clone);
+                    }
+
+                    // Write progress to file
+                    if let Ok(json) = serde_json::to_string(&progress) {
+                        let _ = fs::write(&progress_file_clone, json).await;
+                    }
+
+                    last_update = std::time::Instant::now();
+                }
+            }
+        });
+
+        // Execute the download
+        tracing::info!("Starting download with yt-dlp...");
+        match youtube_dl.download_to_async(&temp_dir).await {
+            Ok(()) => tracing::info!("Download completed successfully"),
+            Err(e) => {
+                tracing::error!("Download error: {}", e);
+
+                // Update progress file with error
+                let mut progress = DownloadProgress::default();
+                progress.status = format!("Error: {}", e);
+                if let Ok(json) = serde_json::to_string(&progress) {
+                    let _ = fs::write(&progress_file, json).await;
+                }
+
+                // Try to clean up the temp directory
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                return Err(ServerFnError::<NoCustomError>::ServerError(format!(
+                    "Download failed: {}",
+                    e
+                )));
+            }
+        }
+
+        // Find the downloaded file
+        tracing::info!("Looking for downloaded file in {:?}", temp_dir);
+        let downloaded_file = find_downloaded_file(&temp_dir).await.map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!(
+                "Failed to find downloaded file: {}",
+                e
+            ))
+        })?;
+
+        tracing::info!("Found downloaded file: {}", downloaded_file.display());
+
+        // Update progress file with completion status
+        let mut progress = DownloadProgress::default();
+        progress.status = "Download complete, preparing file...".to_string();
+        progress.downloaded_bytes = 100;
+        progress.total_bytes = 100;
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = fs::write(&progress_file, json).await;
+        }
+
+        // Read the file content
+        tracing::info!("Reading file content");
+        let content = fs::read(&downloaded_file).await.map_err(|e| {
+            ServerFnError::<NoCustomError>::ServerError(format!(
+                "Failed to read downloaded file: {}",
+                e
+            ))
+        })?;
+
+        // Clean up the temp directory
+        tracing::info!("Cleaning up temporary directory");
+        let _ = fs::remove_dir_all(&temp_dir).await;
+
+        // Clean up progress file
+        let _ = fs::remove_file(&progress_file).await;
+
+        tracing::info!("Downloaded {} bytes successfully", content.len());
+        Ok(content)
+    }
+
+    #[cfg(not(feature = "server"))]
+    Err(ServerFnError::<NoCustomError>::ServerError(
+        "Server feature not enabled".to_string(),
+    ))
+}
+
+#[cfg(feature = "server")]
+async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
+    let dir_path = dir.as_ref();
+    let mut entries = fs::read_dir(dir_path).await?;
+
+    tracing::info!(
+        "Scanning directory {} for downloaded files",
+        dir_path.display()
+    );
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() {
+            // Check the file extension for media types
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if ["mp4", "mp3", "m4a", "webm", "mkv"].contains(&ext_str.as_str()) {
+                    // Get file size for logging
+                    if let Ok(metadata) = fs::metadata(&path).await {
+                        tracing::info!(
+                            "Found file: {} ({} bytes)",
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            metadata.len()
+                        );
+                    }
+                    return Ok(path);
                 }
             }
         }
     }
 
-    tracing::error!(
-        "No files found in {} or its immediate subdirectories",
-        dir_str
-    );
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "No downloaded file found",

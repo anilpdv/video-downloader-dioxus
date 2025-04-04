@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["full"], optional = true }
 tracing = "0.1"
 js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",
@@ -29,10 +30,17 @@ web-sys = { version = "0.3", features = [
     "Window",
     "CssStyleDeclaration",
 ], optional = true }
+dirs = "5.0.1"
 
 [features]
 default = ["server"]
-web = ["dioxus/web", "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+web = [
+    "dioxus/web",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
 server = ["dioxus/server", "dep:youtube_dl", "dep:tokio"]
