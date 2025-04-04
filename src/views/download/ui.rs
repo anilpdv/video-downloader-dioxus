@@ -29,8 +29,8 @@ pub fn Download() -> Element {
     let mut progress_speed = use_signal(|| String::new());
     let mut progress_eta = use_signal(|| String::new());
 
-    // Flag to track if progress simulation is active
-    let mut simulating = use_signal(|| false);
+    // Flag to track if download is in progress and we should poll for updates
+    let mut download_in_progress = use_signal(|| false);
 
     // Define button text based on platform
     let save_button_text = if cfg!(feature = "desktop") {
@@ -73,15 +73,15 @@ pub fn Download() -> Element {
         progress_eta.set("Calculating...".into());
         progress_speed.set(String::new());
 
-        // Set simulating flag to true to enable progress polling
-        simulating.set(true);
+        // Set download_in_progress flag to true to enable progress polling
+        download_in_progress.set(true);
 
         // Execute the actual download with real progress updates
         execute_download(
             url().clone(),
             format_type(),
             quality(),
-            &simulating,
+            &download_in_progress,
             &progress_percent,
             &status,
             &progress_eta,
@@ -144,7 +144,15 @@ pub fn Download() -> Element {
 
         // Get status message for display
         let status_text = match status() {
-            Some(stat) => stat,
+            Some(stat) => {
+                // If status contains "Downloading", make sure we show the percentage
+                if stat.contains("Downloading") {
+                    format!("{}", stat)
+                } else {
+                    // Otherwise just show the status message
+                    stat
+                }
+            }
             None => "Downloading...".to_string(),
         };
 
@@ -156,7 +164,7 @@ pub fn Download() -> Element {
                 }
                 div { class: "w-full bg-gray-700 rounded-full h-2.5",
                     div {
-                        class: "bg-blue-600 h-2.5 rounded-full transition-all duration-500 ease-out",
+                        class: "bg-blue-600 h-2.5 rounded-full transition-all duration-1000 ease-in-out",
                         style: "width: {progress_percent()}%",
                     }
                 }

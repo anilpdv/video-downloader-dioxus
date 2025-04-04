@@ -1,5 +1,7 @@
 use crate::server::download::download_with_quality;
-use crate::views::download::platforms::{create_blob_url, format_eta};
+// Only import what we need
+#[cfg(feature = "web")]
+use crate::views::download::platforms::create_blob_url;
 use crate::views::download::types::{FormatType, Quality};
 use dioxus::prelude::*;
 
@@ -73,106 +75,15 @@ pub fn update_filename(filename: &str, format_type: &FormatType) -> String {
     format!("{}.{}", base_name, extension)
 }
 
-// Handle the download progress simulation
-pub fn simulate_download_progress(
-    simulating: &Signal<bool>,
-    sim_progress: &Signal<i32>,
-    status_sig: &Signal<Option<String>>,
-    sim_eta: &Signal<String>,
-    format_type: &FormatType,
-    quality: &Quality,
-    error_signal: &Signal<Option<String>>,
-) {
-    // Spawn a simplified progress simulation that runs every 2 seconds
-    spawn({
-        let mut simulating = simulating.clone();
-        let mut sim_progress = sim_progress.clone();
-        let mut status_sig = status_sig.clone();
-        let mut sim_eta = sim_eta.clone();
-        let mut error_signal = error_signal.clone();
-
-        async move {
-            // Start at 5% immediately
-            sim_progress.set(5);
-            status_sig.set(Some("Download started (5%)".to_string()));
-
-            let mut current = 5;
-            let step_size = 5;
-            let mut time_waited = 0;
-            let timeout_duration = 180; // 3 minutes max
-
-            while simulating() && current < 85 {
-                // Sleep for 2 seconds to simulate progress
-                #[cfg(feature = "web")]
-                {
-                    use js_sys::Promise;
-                    use wasm_bindgen::prelude::*;
-                    use wasm_bindgen_futures::JsFuture;
-
-                    if let Some(window) = web_sys::window() {
-                        let promise = Promise::new(&mut |resolve, _| {
-                            let closure = Closure::once_into_js(move || {
-                                resolve.call0(&JsValue::NULL).unwrap();
-                            });
-
-                            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                                closure.as_ref().unchecked_ref(),
-                                2000,
-                            );
-                        });
-
-                        let _ = JsFuture::from(promise).await;
-                    }
-                }
-
-                #[cfg(not(feature = "web"))]
-                {
-                    use std::thread;
-                    use std::time::Duration;
-                    thread::sleep(Duration::from_secs(2));
-                }
-
-                if !simulating() {
-                    break;
-                }
-
-                // Increment progress
-                current += step_size;
-                sim_progress.set(current);
-
-                // Update status message
-                status_sig.set(Some(format!("Downloading... ({}%)", current)));
-
-                // Calculate and update ETA
-                let remaining = (85 - current) / step_size;
-                let eta_seconds = (remaining * 2) as u64; // 2 seconds per step, convert to u64
-                sim_eta.set(format_eta(eta_seconds));
-
-                // Check for timeout
-                time_waited += 2;
-                if time_waited > timeout_duration {
-                    status_sig.set(Some("Download taking longer than expected...".to_string()));
-                    if time_waited > timeout_duration + 60 {
-                        // After 4 minutes total, assume something went wrong
-                        error_signal.set(Some("Download timed out. Please try again.".into()));
-                        simulating.set(false);
-                        break;
-                    }
-                }
-            }
-        }
-    });
-}
-
 // Execute download and handle results
 pub fn execute_download(
     url: String,
     format_type: FormatType,
     quality: Quality,
-    simulating: &Signal<bool>,
-    sim_progress: &Signal<i32>,
+    download_in_progress: &Signal<bool>,
+    progress_percent: &Signal<i32>,
     status_sig: &Signal<Option<String>>,
-    sim_eta: &Signal<String>,
+    progress_eta: &Signal<String>,
     loading: &Signal<bool>,
     error_signal: &Signal<Option<String>>,
     download_data: &Signal<Option<Vec<u8>>>,
@@ -183,15 +94,16 @@ pub fn execute_download(
         let url_clone = url.clone();
         let format_str = format_type.to_string();
         let quality_str = quality.to_string();
-        let mut simulating = simulating.clone();
+        let mut download_in_progress = download_in_progress.clone();
         let mut status_sig = status_sig.clone();
-        let mut sim_progress = sim_progress.clone();
-        let mut sim_eta = sim_eta.clone();
+        let mut progress_percent = progress_percent.clone();
+        let mut progress_eta = progress_eta.clone();
         let mut error_signal = error_signal.clone();
         let mut loading = loading.clone();
         let mut download_data = download_data.clone();
         let mut blob_url = blob_url.clone();
         let mut download_ready = download_ready.clone();
+        #[cfg(feature = "web")]
         let format_type = format_type.clone();
 
         async move {
@@ -206,59 +118,135 @@ pub fn execute_download(
 
             // Create a progress checker task that runs in parallel
             let url_for_progress = url_clone.clone();
-            let mut simulating_for_progress = simulating.clone();
-            let mut sim_progress_for_progress = sim_progress.clone();
-            let mut status_sig_for_progress = status_sig.clone();
-            let mut sim_eta_for_progress = sim_eta.clone();
+            let mut download_in_progress_for_polling = download_in_progress.clone();
+            let mut progress_percent_for_polling = progress_percent.clone();
+            let mut status_sig_for_polling = status_sig.clone();
+            let mut progress_eta_for_polling = progress_eta.clone();
 
             // Start a background task to poll for progress updates
-            let progress_task = spawn({
+            let _progress_task = spawn({
                 let url = url_for_progress.clone();
                 async move {
                     // Import GetDownloadProgress function
                     use crate::server::download::handlers::get_download_progress;
+                    use crate::views::download::platforms::format_eta;
 
                     // Use a longer delay between progress checks to reduce request frequency
-                    let poll_interval = std::time::Duration::from_millis(750);
+                    let poll_interval = std::time::Duration::from_millis(1000);
 
                     // Track the last progress value to implement smoothing
                     let mut last_progress = 0;
                     let mut last_status = String::new();
+                    let mut status_update_timer = std::time::Instant::now();
+
+                    // Track when download began for time-based progress
+                    let download_start_time = std::time::Instant::now();
+                    let estimated_completion_seconds = 180.0; // Estimate 3 minutes for full download
+
+                    // Count how many times we've seen a high percentage to determine if it's stuck
+                    let mut high_percent_count = 0;
+
+                    // Are we in the "downloading" phase (past initialization)
+                    let mut in_download_phase = false;
 
                     // Check progress while download is in progress
-                    while simulating_for_progress() {
+                    while download_in_progress_for_polling() {
                         match get_download_progress(url.clone()).await {
                             Ok((downloaded, total, eta_seconds, status)) => {
-                                // Calculate progress percentage (0-100)
-                                let raw_progress_pct = if total > 0 {
+                                // Mark that we're in download phase if status contains "Downloading"
+                                if status.contains("Downloading") {
+                                    in_download_phase = true;
+                                }
+
+                                // Calculate actual progress from backend (0-100)
+                                let backend_progress = if total > 0 {
                                     ((downloaded as f64 / total as f64) * 100.0) as i32
                                 } else {
-                                    // If total is 0, use the raw downloaded value (assuming 0-100 range)
                                     downloaded as i32
                                 };
 
-                                // Apply smoothing - only update if progress has changed significantly or status changed
-                                let smooth_progress = if raw_progress_pct > last_progress + 1
-                                    || status != last_status
-                                {
-                                    // Never decrease progress and don't jump too far ahead
-                                    let new_progress = raw_progress_pct.max(last_progress);
-                                    last_progress = new_progress;
-                                    last_status = status.clone();
-                                    new_progress
+                                // Calculate time-based progress component (0-100)
+                                let elapsed_seconds = download_start_time.elapsed().as_secs_f64();
+                                let time_ratio =
+                                    (elapsed_seconds / estimated_completion_seconds).min(1.0);
+                                let time_progress = (time_ratio * 90.0) as i32; // Max 90% from time
+
+                                // Detect if backend is reporting a large jump (like 7% → 85%)
+                                let is_large_jump = backend_progress > last_progress + 20;
+
+                                // Handle case where backend jumps to high percentage and stalls
+                                if backend_progress > 80 {
+                                    high_percent_count += 1;
+
+                                    // If we've seen high percentages multiple times, it might be stalled
+                                    if high_percent_count > 3 {
+                                        // Calculate a smoother progress based on time passed
+                                        // This will show progress from 80% to 95% based on time
+                                        let stall_progress =
+                                            80 + ((time_ratio * 15.0) as i32).min(15);
+
+                                        // Only update if the smooth progress is increasing
+                                        if stall_progress > last_progress {
+                                            progress_percent_for_polling.set(stall_progress);
+                                            last_progress = stall_progress;
+
+                                            // Update status to indicate "Processing..."
+                                            if status_update_timer.elapsed().as_secs() >= 3 {
+                                                let progress_msg =
+                                                    format!("Processing... {}%", stall_progress);
+                                                status_sig_for_polling.set(Some(progress_msg));
+                                                status_update_timer = std::time::Instant::now();
+                                            }
+                                        }
+                                    }
                                 } else {
-                                    // Don't update UI if change is minimal
-                                    continue;
+                                    high_percent_count = 0;
+                                }
+
+                                // Calculate smooth progress value based on current state
+                                let smooth_progress = if in_download_phase {
+                                    if is_large_jump {
+                                        // If backend made a big jump, create intermediate values
+                                        // Progress based on time but capped below backend value
+                                        let max_allowed = backend_progress - 5;
+                                        last_progress + 1.min(max_allowed - last_progress)
+                                    } else {
+                                        // Otherwise use the backend value with slight smoothing
+                                        // Never go backward, and never jump more than 2% at once
+                                        let next_progress = backend_progress.max(last_progress);
+                                        last_progress + (next_progress - last_progress).min(2)
+                                    }
+                                } else {
+                                    // During initialization phase, use time-based progress
+                                    // Cap at 20% during initialization
+                                    time_progress.min(20)
                                 };
 
-                                // Update UI with smoothed progress
-                                sim_progress_for_progress.set(smooth_progress);
-                                status_sig_for_progress.set(Some(status.clone()));
+                                // Only update UI if progress has changed
+                                if smooth_progress > last_progress {
+                                    progress_percent_for_polling.set(smooth_progress);
+                                    last_progress = smooth_progress;
+                                }
+
+                                // Update status if it's significantly different
+                                if status != last_status
+                                    && status_update_timer.elapsed().as_secs() >= 3
+                                {
+                                    // Show percentage in status message
+                                    let status_with_percent = if !status.contains("%") {
+                                        format!("{} ({}%)", status, smooth_progress)
+                                    } else {
+                                        status.clone()
+                                    };
+
+                                    status_sig_for_polling.set(Some(status_with_percent));
+                                    last_status = status;
+                                    status_update_timer = std::time::Instant::now();
+                                }
 
                                 // Format ETA
                                 if eta_seconds > 0 {
-                                    use crate::views::download::platforms::format_eta;
-                                    sim_eta_for_progress.set(format_eta(eta_seconds));
+                                    progress_eta_for_polling.set(format_eta(eta_seconds));
                                 }
                             }
                             Err(e) => {
@@ -267,7 +255,7 @@ pub fn execute_download(
                             }
                         }
 
-                        // Longer delay between progress checks to avoid overwhelming the server
+                        // Delay between progress checks
                         #[cfg(feature = "web")]
                         {
                             use js_sys::Promise;
@@ -296,8 +284,8 @@ pub fn execute_download(
                             tokio::time::sleep(poll_interval).await;
                         }
 
-                        // Stop checking if we're no longer simulating
-                        if !simulating_for_progress() {
+                        // Stop checking if we're no longer downloading
+                        if !download_in_progress_for_polling() {
                             break;
                         }
                     }
@@ -315,14 +303,14 @@ pub fn execute_download(
                 elapsed
             )));
 
-            // Stop simulation and progress polling
-            simulating.set(false);
+            // Stop progress polling
+            download_in_progress.set(false);
 
             match result {
                 Ok(data) => {
                     // Set progress to 100% for completion
-                    sim_progress.set(100);
-                    sim_eta.set("0s".into());
+                    progress_percent.set(100);
+                    progress_eta.set("0s".into());
 
                     if data.is_empty() {
                         error_signal
