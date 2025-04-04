@@ -1,4 +1,4 @@
-use crate::server::download::handlers::get_video_info;
+use crate::server::download::handlers::info::get_video_info;
 use dioxus::prelude::*;
 
 #[component]

@@ -1,66 +1,15 @@
 use dioxus::prelude::*;
 use serde_json;
 use server_fn::error::NoCustomError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::fs;
-use tokio::runtime::Runtime;
 use tracing;
 
-#[cfg(feature = "server")]
-use crate::database::{get_database, models::Download as DbDownload, schema::save_download};
-use crate::server::download::{storage, types::DownloadProgress, utils, ytdlp};
+use super::database::save_download_info;
+use crate::server::download::{storage, types::DownloadProgress, utils};
 
 #[cfg(feature = "server")]
 use youtube_dl::{YoutubeDl, YoutubeDlOutput};
-
-#[server(Echo)]
-pub async fn echo(input: String) -> Result<String, ServerFnError<NoCustomError>> {
-    Ok(input)
-}
-
-/// Get progress information for an ongoing download
-#[server(GetDownloadProgress)]
-pub async fn get_download_progress(
-    url: String,
-) -> Result<(u64, u64, u64, String), ServerFnError<NoCustomError>> {
-    tracing::info!("Checking progress for URL: {}", url);
-
-    #[cfg(feature = "server")]
-    {
-        // Create a unique ID based on the URL to track this specific download
-        let progress_id = format!("download_{}", url.len());
-        let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
-
-        if progress_file.exists() {
-            match fs::read_to_string(&progress_file).await {
-                Ok(content) => match serde_json::from_str::<DownloadProgress>(&content) {
-                    Ok(progress) => {
-                        return Ok((
-                            progress.downloaded_bytes,
-                            progress.total_bytes,
-                            progress.eta_seconds,
-                            progress.status,
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse progress data: {}", e);
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("Failed to read progress file: {}", e);
-                }
-            }
-        }
-
-        // Return default values if no progress is found
-        Ok((0, 0, 0, "Initializing download...".to_string()))
-    }
-
-    #[cfg(not(feature = "server"))]
-    Err(ServerFnError::<NoCustomError>::ServerError(
-        "Server feature not enabled".to_string(),
-    ))
-}
 
 /// Download video with highest quality
 #[server(DownloadVideo)]
@@ -84,76 +33,6 @@ pub async fn download_with_options(
     } else {
         download_with_quality(url, "video".to_string(), "highest".to_string()).await
     }
-}
-
-/// Get video info without downloading
-#[server(GetVideoInfo)]
-pub async fn get_video_info(url: String) -> Result<String, ServerFnError<NoCustomError>> {
-    tracing::info!("Getting video info for: {}", url);
-
-    #[cfg(feature = "server")]
-    {
-        let output = match YoutubeDl::new(url).run_async().await.map_err(|e| {
-            ServerFnError::<NoCustomError>::ServerError(format!("Error fetching video info: {}", e))
-        })? {
-            YoutubeDlOutput::SingleVideo(video) => video,
-            YoutubeDlOutput::Playlist(_) => {
-                return Err(ServerFnError::<NoCustomError>::ServerError(
-                    "URL points to a playlist, not a single video".to_string(),
-                ));
-            }
-        };
-
-        // Convert the video info to JSON
-        let json_str = serde_json::to_string(&output).map_err(|e| {
-            ServerFnError::<NoCustomError>::ServerError(format!(
-                "Error serializing video info: {}",
-                e
-            ))
-        })?;
-
-        Ok(json_str)
-    }
-
-    #[cfg(not(feature = "server"))]
-    Err(ServerFnError::<NoCustomError>::ServerError(
-        "Server feature not enabled".to_string(),
-    ))
-}
-
-/// Search YouTube videos
-#[server(SearchYoutube)]
-pub async fn search_youtube(query: String) -> Result<String, ServerFnError<NoCustomError>> {
-    tracing::info!("Searching YouTube for: {}", query);
-
-    #[cfg(feature = "server")]
-    {
-        // Create search options for YouTube
-        let search_options = youtube_dl::SearchOptions::youtube(query).with_count(10); // Get 10 results
-
-        // Run the search
-        let output = YoutubeDl::search_for(&search_options)
-            .run_async()
-            .await
-            .map_err(|e| {
-                ServerFnError::<NoCustomError>::ServerError(format!("Error searching: {}", e))
-            })?;
-
-        // Convert the output to JSON
-        let json_str = serde_json::to_string(&output).map_err(|e| {
-            ServerFnError::<NoCustomError>::ServerError(format!(
-                "Error serializing search results: {}",
-                e
-            ))
-        })?;
-
-        Ok(json_str)
-    }
-
-    #[cfg(not(feature = "server"))]
-    Err(ServerFnError::<NoCustomError>::ServerError(
-        "Server feature not enabled".to_string(),
-    ))
 }
 
 /// Download with specific format_type and quality
@@ -566,7 +445,7 @@ pub async fn download_video_with_progress(
     set_progress: impl Fn(f32, Option<String>, Option<String>) + Clone + Send + 'static,
 ) -> Result<String, String> {
     // First fetch video information
-    let video_info = get_video_info(url.clone())
+    let video_info = super::info::get_video_info(url.clone())
         .await
         .map_err(|e| format!("Error fetching video info: {}", e))?;
 
@@ -642,12 +521,6 @@ pub async fn download_video_with_progress(
                 }
             }
 
-            // Always clean up temporary files
-            tracing::info!("Cleaning up temporary files");
-            // No need to clean up as we just save the file directly to final locations
-
-            tracing::info!("Downloaded {} bytes successfully", content.len());
-
             // Get file size
             let file_size = content.len() as i64;
 
@@ -673,51 +546,4 @@ pub async fn download_video_with_progress(
         }
         Err(e) => Err(format!("Download error: {}", e)),
     }
-}
-
-/// Save download info to database
-#[cfg(feature = "server")]
-async fn save_download_info(
-    url: &str,
-    title: &str,
-    filename: &str,
-    file_path: &str,
-    format_type: &str,
-    quality: &str,
-    file_size: i64,
-) -> Result<(), ServerFnError<NoCustomError>> {
-    let video_id = DbDownload::extract_video_id(url);
-
-    // Generate thumbnail URL if video ID is available
-    let thumbnail_url = video_id
-        .as_ref()
-        .map(|id| DbDownload::generate_thumbnail_url(id));
-
-    // Set initial values for the download record
-    let download = DbDownload::new(
-        url.to_string(),
-        Some(title.to_string()),
-        filename.to_string(),
-        file_path.to_string(),
-        format_type.to_string(),
-        quality.to_string(),
-        Some(file_size),
-        thumbnail_url,
-        video_id,
-        None, // Duration not available
-    );
-
-    // Try to save to database
-    if let Ok(pool) = get_database().await {
-        if let Err(e) = save_download(&pool, &download).await {
-            tracing::error!("Failed to save download history: {}", e);
-            return Err(ServerFnError::<NoCustomError>::ServerError(format!(
-                "Failed to save download history: {}",
-                e
-            )));
-        } else {
-            tracing::info!("Saved download history for: {}", title);
-        }
-    }
-    Ok(())
 }
