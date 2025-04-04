@@ -63,9 +63,12 @@ pub async fn download_with_quality(
         let progress_id = format!("download_{}", url.len());
         let progress_file = std::env::temp_dir().join(format!("{}.progress", progress_id));
 
-        // Initialize progress file right away to show something to the user
+        // Initialize progress file with 0% progress right away - THIS IS CRITICAL
         let mut initial_progress = DownloadProgress::default();
         initial_progress.status = "Initializing download...".to_string();
+        initial_progress.downloaded_bytes = 0; // Start at 0%
+        initial_progress.total_bytes = 100; // Set to 100 for percentage calculation
+        initial_progress.eta_seconds = 0;
         if let Ok(json) = serde_json::to_string(&initial_progress) {
             let _ = std::fs::write(&progress_file, json);
         }
@@ -85,19 +88,22 @@ pub async fn download_with_quality(
         // Store URL for background tasks
         let url_str = url.clone();
 
-        // Start a task to update the progress file periodically
+        // Start a task to update the progress file periodically during initialization
         tokio::spawn({
             let progress_file = progress_file.clone();
             async move {
-                // Update progress every second while we initialize
-                for i in 1..30 {
-                    // timeout after 30 seconds
+                // Update progress every 500ms while we initialize (show 0-5% progress)
+                for i in 0..30 {
+                    // timeout after 15 seconds
                     let mut progress = DownloadProgress::default();
-                    progress.status = format!("Preparing download ({}s)...", i);
+                    let percent = ((i as f64) / 30.0 * 5.0).min(5.0) as u64; // Max 5% during init
+                    progress.downloaded_bytes = percent;
+                    progress.total_bytes = 100;
+                    progress.status = format!("Preparing download ({}s)...", i / 2);
                     if let Ok(json) = serde_json::to_string(&progress) {
                         let _ = std::fs::write(&progress_file, json);
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
             }
         });
@@ -120,29 +126,270 @@ pub async fn download_with_quality(
                 // We only need certain fields, so let's extract those
                 match info_dl.run_async().await {
                     Ok(YoutubeDlOutput::SingleVideo(video)) => {
-                        let mut result = (String::from("Unknown"), 0u64);
+                        // Initialize result with defaults
+                        let mut title = String::from("Unknown");
+                        let mut size: u64 = 0;
+                        let mut duration_secs: u64 = 0;
 
                         // Extract title
-                        if let Some(title) = &video.title {
-                            result.0 = title.clone();
+                        if let Some(video_title) = &video.title {
+                            title = video_title.clone();
+                        }
+
+                        // Extract duration if available (for better progress estimation)
+                        if let Some(duration_float) = video.duration {
+                            // Safely convert the duration to u64 based on the type
+                            match duration_float {
+                                serde_json::Value::Number(num) => {
+                                    if let Some(n) = num.as_f64() {
+                                        duration_secs = n as u64;
+                                    }
+                                }
+                                // Handle other cases gracefully
+                                _ => {}
+                            }
                         }
 
                         // Extract estimated size
                         if let Some(formats) = video.formats {
                             for format in formats {
-                                if let Some(size) = format.filesize {
+                                if let Some(format_size) = format.filesize {
                                     // Make sure both values are the same type (u64)
-                                    let size_u64 = size as u64;
-                                    if size_u64 > result.1 {
-                                        result.1 = size_u64;
+                                    let size_u64 = format_size as u64;
+                                    if size_u64 > size {
+                                        size = size_u64;
                                     }
                                 }
                             }
                         }
 
-                        Some(result)
+                        Some((title, size, duration_secs))
                     }
                     _ => None,
+                }
+            }
+        });
+
+        // Update progress to 5% - Video info fetch started
+        let mut progress = DownloadProgress::default();
+        progress.downloaded_bytes = 5;
+        progress.total_bytes = 100;
+        progress.status = "Fetching video information...".to_string();
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
+
+        // Wait for video info (but don't block too long - max 10 seconds)
+        let (video_title, estimated_size, duration_secs) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(10), video_info_task)
+                .await
+                .unwrap_or(Ok(None))
+                .unwrap_or(None)
+                .unwrap_or((String::from("Unknown"), 0, 0));
+
+        tracing::info!(
+            "Will download: {:?} (est. size: {}, duration: {} seconds)",
+            video_title,
+            estimated_size,
+            duration_secs
+        );
+
+        // Update progress file with title and move to 10% progress once we have video info
+        let mut progress = DownloadProgress::default();
+        progress.downloaded_bytes = 10; // 10% progress after getting video info
+        progress.total_bytes = 100;
+        progress.status = format!("Starting download: {}", video_title);
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
+
+        // Calculate approximate download size based on quality
+        let adjusted_estimated_size = if estimated_size == 0 {
+            // If we couldn't get the size, estimate based on duration and quality
+            match quality.to_lowercase().as_str() {
+                "lowest" => duration_secs * 50 * 1024, // ~50KB per second for lowest quality
+                "medium" => duration_secs * 250 * 1024, // ~250KB per second for medium quality
+                "highest" | _ => duration_secs * 500 * 1024, // ~500KB per second for highest quality
+            }
+        } else {
+            estimated_size
+        };
+
+        // Launch a separate task to monitor the download progress by checking file size
+        let progress_file_clone = progress_file.clone();
+        let temp_dir_clone = temp_dir.clone();
+        let video_title_clone = video_title.clone();
+        let estimated_size_clone = adjusted_estimated_size.max(1024 * 1024); // Ensure at least 1MB to avoid division by zero
+
+        tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+            let mut last_size: u64 = 0;
+            let mut last_update = std::time::Instant::now();
+            let mut stalled_counter = 0;
+            let mut download_started = false;
+            let mut max_progress = 10; // Start at 10% (after getting video info)
+
+            loop {
+                // Check every 250ms for more responsive updates
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+                // Check if the temp directory still exists (download might have finished)
+                if !temp_dir_clone.exists() {
+                    break;
+                }
+
+                // Calculate current size of all files in the directory
+                let mut current_size: u64 = 0;
+                let mut is_processing = false;
+                let mut has_part_file = false;
+
+                // Read directory to find all files
+                if let Ok(mut entries) = fs::read_dir(&temp_dir_clone).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if path.is_file() {
+                            // Check if file is a temporary/part file
+                            let filename = path.file_name().unwrap_or_default().to_string_lossy();
+
+                            // Detect if we're downloading (part files) or processing (media files)
+                            if filename.ends_with(".part") || filename.contains(".f") {
+                                has_part_file = true;
+                            }
+
+                            if filename.contains(".mkv")
+                                || filename.contains(".mp4")
+                                || filename.contains(".webm")
+                                || filename.contains(".mp3")
+                            {
+                                is_processing = true;
+                            }
+
+                            if let Ok(metadata) = fs::metadata(&path).await {
+                                current_size += metadata.len();
+                            }
+                        }
+                    }
+                } else {
+                    // Directory might be gone or inaccessible
+                    break;
+                }
+
+                // Update progress
+                if last_update.elapsed().as_millis() > 250 {
+                    // Update progress status
+                    let mut progress = DownloadProgress::default();
+
+                    // Mark that download has started when we see a part file
+                    if has_part_file && !download_started {
+                        download_started = true;
+                        // Keep progress at 10% initially when download actually starts
+                        max_progress = 10;
+                    }
+
+                    // Calculate metrics based on download state
+                    if is_processing {
+                        // If we're processing (merging video and audio), set to 80-90%
+                        progress.status = "Processing video...".to_string();
+                        let process_percent = 80
+                            + (std::time::Instant::now()
+                                .duration_since(start_time)
+                                .as_secs()
+                                % 10);
+                        progress.downloaded_bytes = process_percent as u64;
+                        progress.total_bytes = 100;
+                        progress.eta_seconds = 0;
+                    } else if current_size > 0 && download_started {
+                        // Calculate download speed
+                        let elapsed_secs = start_time.elapsed().as_secs().max(1); // Avoid division by zero
+                        let download_speed = current_size as f64 / elapsed_secs as f64;
+
+                        // Calculate progress percentage between 10% and 80%
+                        let raw_percent = if estimated_size_clone > 0 {
+                            // Use min to cap at 80% for download phase
+                            ((current_size as f64 / estimated_size_clone as f64) * 70.0 + 10.0)
+                                .min(80.0)
+                        } else {
+                            // If we don't have a size estimate, use time-based estimation
+                            // Cap at 80% and ensure it doesn't decrease
+                            let time_based =
+                                ((elapsed_secs as f64).min(600.0) / 600.0 * 70.0 + 10.0).min(80.0);
+                            time_based
+                        };
+
+                        // Ensure progress never decreases and increases smoothly
+                        let percent = (raw_percent as u64).max(max_progress);
+                        max_progress = percent;
+
+                        // Set progress values
+                        progress.downloaded_bytes = percent;
+                        progress.total_bytes = 100;
+
+                        // Calculate ETA based on download speed and estimated remaining size
+                        if download_speed > 100.0 {
+                            // Only show ETA if speed is reasonable
+                            let remaining_bytes = estimated_size_clone.saturating_sub(current_size);
+                            let eta_secs = (remaining_bytes as f64 / download_speed) as u64;
+                            progress.eta_seconds = eta_secs;
+
+                            // Format ETA for display
+                            let eta_display = if eta_secs > 60 {
+                                format!("{:.1} min", eta_secs as f64 / 60.0)
+                            } else {
+                                format!("{} sec", eta_secs)
+                            };
+
+                            // Calculate and display download speed
+                            let speed_display = if download_speed > 1024.0 * 1024.0 {
+                                format!("{:.1} MB/s", download_speed / (1024.0 * 1024.0))
+                            } else {
+                                format!("{:.1} KB/s", download_speed / 1024.0)
+                            };
+
+                            progress.status = format!(
+                                "Downloading: {}% of {} ({}), ETA: {}",
+                                percent, video_title_clone, speed_display, eta_display
+                            );
+                        } else {
+                            progress.status =
+                                format!("Downloading: {}% of {}", percent, video_title_clone);
+                        }
+
+                        // Check if download is stalled
+                        if current_size == last_size && has_part_file {
+                            stalled_counter += 1;
+                            // After 10 seconds with no progress, indicate stalled download
+                            if stalled_counter >= 40 {
+                                // 10 seconds (40 * 250ms)
+                                progress.status = format!(
+                                    "Download stalled at {}% ({:.1} MB)...",
+                                    percent,
+                                    current_size as f64 / (1024.0 * 1024.0)
+                                );
+                            }
+                        } else {
+                            stalled_counter = 0;
+                            last_size = current_size;
+                        }
+                    } else {
+                        // Waiting for download to start
+                        if download_started {
+                            progress.downloaded_bytes = 10; // 10% while waiting for first bytes
+                        } else {
+                            // Gradually increase from 5% to 10% during initialization
+                            let elapsed_secs = start_time.elapsed().as_secs();
+                            progress.downloaded_bytes = 5 + (elapsed_secs.min(10) as u64).max(0);
+                            // 5-10% during waiting
+                        }
+                        progress.total_bytes = 100;
+                        progress.status = format!("Starting download of {}...", video_title_clone);
+                    }
+
+                    // Write progress to file
+                    if let Ok(json) = serde_json::to_string(&progress) {
+                        let _ = fs::write(&progress_file_clone, json).await;
+                    }
+
+                    last_update = std::time::Instant::now();
                 }
             }
         });
@@ -186,162 +433,14 @@ pub async fn download_with_quality(
             }
         }
 
-        // Wait for video info (but don't block too long - max 10 seconds)
-        let (video_title, estimated_size) =
-            tokio::time::timeout(tokio::time::Duration::from_secs(10), video_info_task)
-                .await
-                .unwrap_or(Ok(None))
-                .unwrap_or(None)
-                .unwrap_or((String::from("Unknown"), 0));
-
-        tracing::info!(
-            "Will download: {:?} (est. size: {})",
-            video_title,
-            estimated_size
-        );
-
-        // Update progress file with title
+        // Update progress to 15% - Download about to start
         let mut progress = DownloadProgress::default();
+        progress.downloaded_bytes = 15;
+        progress.total_bytes = 100;
         progress.status = format!("Starting download: {}", video_title);
         if let Ok(json) = serde_json::to_string(&progress) {
             let _ = std::fs::write(&progress_file, json);
         }
-
-        // Launch a separate task to monitor the download progress by checking file size
-        let progress_file_clone = progress_file.clone();
-        let temp_dir_clone = temp_dir.clone();
-        let video_title_clone = video_title.clone();
-        let estimated_size_clone = estimated_size;
-
-        tokio::spawn(async move {
-            let start_time = std::time::Instant::now();
-            let mut last_size: u64 = 0;
-            let mut last_update = std::time::Instant::now();
-            let mut stalled_counter = 0;
-
-            loop {
-                // Check every 1 second
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-                // Check if the temp directory still exists (download might have finished)
-                if !temp_dir_clone.exists() {
-                    break;
-                }
-
-                // Calculate current size of all files in the directory
-                let mut current_size: u64 = 0;
-                let mut is_processing = false;
-
-                // Read directory to find all files
-                if let Ok(mut entries) = fs::read_dir(&temp_dir_clone).await {
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let path = entry.path();
-                        if path.is_file() {
-                            // Check if file is a temporary/part file
-                            let filename = path.file_name().unwrap_or_default().to_string_lossy();
-
-                            // Check if we're in the processing phase (ffmpeg merging, etc)
-                            if filename.contains(".mkv")
-                                || filename.contains(".mp4")
-                                || filename.contains(".webm")
-                                || filename.contains(".mp3")
-                            {
-                                is_processing = true;
-                            }
-
-                            if let Ok(metadata) = fs::metadata(&path).await {
-                                current_size += metadata.len();
-                            }
-                        }
-                    }
-                } else {
-                    // Directory might be gone or inaccessible
-                    break;
-                }
-
-                // Update progress
-                if last_update.elapsed().as_millis() > 500 {
-                    // Update at most twice per second
-                    // Calculate progress metrics
-                    let elapsed_secs = start_time.elapsed().as_secs();
-                    let download_speed = if elapsed_secs > 0 {
-                        current_size as f64 / elapsed_secs as f64
-                    } else {
-                        0.0
-                    };
-
-                    let mut progress = DownloadProgress::default();
-
-                    if is_processing {
-                        // If we're processing (merging video and audio), set a specific status
-                        progress.status = "Processing video...".to_string();
-                        // Set to 99% to indicate almost done
-                        progress.downloaded_bytes = 99;
-                        progress.total_bytes = 100;
-                        progress.eta_seconds = 0;
-                    } else if current_size > 0 {
-                        // Normal download progress
-                        if estimated_size_clone > 0 {
-                            // We have an estimated total size
-                            progress.downloaded_bytes = current_size;
-                            progress.total_bytes = estimated_size_clone;
-
-                            // Calculate ETA if we have a non-zero download speed
-                            if download_speed > 0.0 {
-                                let remaining_bytes = if estimated_size_clone > current_size {
-                                    estimated_size_clone - current_size
-                                } else {
-                                    0
-                                };
-                                let eta_secs = (remaining_bytes as f64 / download_speed) as u64;
-                                progress.eta_seconds = eta_secs;
-                            }
-
-                            // Calculate percentage
-                            let percent =
-                                (current_size as f64 / estimated_size_clone as f64 * 100.0) as u64;
-                            progress.status =
-                                format!("Downloading: {}% of {}", percent, video_title_clone);
-                        } else {
-                            // No estimated size, just show downloaded size
-                            progress.downloaded_bytes = current_size;
-                            // Set an arbitrary total that's higher than current to show progress
-                            progress.total_bytes = current_size.saturating_add(10 * 1024 * 1024); // Add 10MB
-                            progress.status = format!(
-                                "Downloading: {:.2} MB of {}",
-                                current_size as f64 / (1024.0 * 1024.0),
-                                video_title_clone
-                            );
-                        }
-
-                        // Check if download is stalled
-                        if current_size == last_size {
-                            stalled_counter += 1;
-                            // After 10 seconds with no progress, indicate stalled download
-                            if stalled_counter >= 10 {
-                                progress.status = format!(
-                                    "Download stalled at {:.2} MB...",
-                                    current_size as f64 / (1024.0 * 1024.0)
-                                );
-                            }
-                        } else {
-                            stalled_counter = 0;
-                            last_size = current_size;
-                        }
-                    } else {
-                        // No progress yet
-                        progress.status = format!("Starting download of {}...", video_title_clone);
-                    }
-
-                    // Write progress to file
-                    if let Ok(json) = serde_json::to_string(&progress) {
-                        let _ = fs::write(&progress_file_clone, json).await;
-                    }
-
-                    last_update = std::time::Instant::now();
-                }
-            }
-        });
 
         // Execute the download
         tracing::info!("Starting download with yt-dlp...");
@@ -353,6 +452,8 @@ pub async fn download_with_quality(
                 // Update progress file with error
                 let mut progress = DownloadProgress::default();
                 progress.status = format!("Error: {}", e);
+                progress.downloaded_bytes = 100; // Set to 100% to indicate we're done (with error)
+                progress.total_bytes = 100;
                 if let Ok(json) = serde_json::to_string(&progress) {
                     let _ = fs::write(&progress_file, json).await;
                 }
@@ -377,10 +478,10 @@ pub async fn download_with_quality(
 
         tracing::info!("Found downloaded file: {}", downloaded_file.display());
 
-        // Update progress file with completion status
+        // Update progress file with completion status - 90%
         let mut progress = DownloadProgress::default();
         progress.status = "Download complete, preparing file...".to_string();
-        progress.downloaded_bytes = 100;
+        progress.downloaded_bytes = 90;
         progress.total_bytes = 100;
         if let Ok(json) = serde_json::to_string(&progress) {
             let _ = fs::write(&progress_file, json).await;
@@ -394,6 +495,13 @@ pub async fn download_with_quality(
                 e
             ))
         })?;
+
+        // Update progress file - 95%
+        progress.status = "Saving file to permanent location...".to_string();
+        progress.downloaded_bytes = 95;
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
 
         // Create a permanent path for database record
         let mut file_path_for_db = downloaded_file.to_string_lossy().to_string();
@@ -436,9 +544,27 @@ pub async fn download_with_quality(
             }
         }
 
+        // Update progress file - 99%
+        progress.status = "Finalizing...".to_string();
+        progress.downloaded_bytes = 99;
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
+
         // Always clean up temporary files
         tracing::info!("Cleaning up temporary files");
         let _ = fs::remove_dir_all(&temp_dir).await;
+
+        // Set progress to 100% before removing the progress file
+        progress.status = "Download complete!".to_string();
+        progress.downloaded_bytes = 100;
+        progress.total_bytes = 100;
+        if let Ok(json) = serde_json::to_string(&progress) {
+            let _ = std::fs::write(&progress_file, json);
+        }
+
+        // Keep the progress file around briefly to ensure UI can read the 100% completion
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let _ = fs::remove_file(&progress_file).await;
 
         // Get file size
@@ -497,11 +623,11 @@ pub async fn download_video_with_progress(
     path: Option<String>,
     set_progress: impl Fn(f32, Option<String>, Option<String>) + Clone + Send + 'static,
 ) -> Result<String, String> {
+    // Immediately update progress to show user something is happening - 0%
+    set_progress(0.0, Some("Fetching video information...".to_string()), None);
+
     // Start a background task to get video info
     let video_info_future = super::info::get_video_info(url.clone());
-
-    // Immediately update progress to show user something is happening
-    set_progress(0.0, Some("Fetching video information...".to_string()), None);
 
     // First fetch video information
     let video_info = video_info_future
@@ -518,24 +644,85 @@ pub async fn download_video_with_progress(
         .unwrap_or("unknown_title")
         .to_string();
 
-    // Update progress to show we're starting the download
+    // Update progress to show we're starting the download - 5%
     set_progress(0.05, Some(format!("Starting download of: {}", title)), None);
 
-    // Start the video download
+    // Start the video download - 10%
     set_progress(0.1, Some("Preparing download...".to_string()), None);
+
+    // Use a custom progress callback that updates both our local progress tracking
+    // and the provided set_progress callback
+    struct ProgressTracker {
+        progress: f32,
+        file_exists: bool,
+    }
+
+    let progress_tracker = std::sync::Arc::new(std::sync::Mutex::new(ProgressTracker {
+        progress: 0.1, // Start at 10%
+        file_exists: false,
+    }));
+
+    // Create a clone of the progress tracker for the monitoring task
+    let progress_tracker_clone = progress_tracker.clone();
+
+    // Set up a task to update progress based on the progress file
+    let url_len = url.len();
+    let set_progress_clone = set_progress.clone();
+    let progress_updater = tokio::spawn(async move {
+        let progress_file = std::env::temp_dir().join(format!("download_{}.progress", url_len));
+
+        // Check progress every 250ms
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+            if progress_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(&progress_file) {
+                    if let Ok(progress) = serde_json::from_str::<DownloadProgress>(&content) {
+                        let mut tracker = progress_tracker_clone.lock().unwrap();
+
+                        // Convert to 0.0-1.0 range and ensure it never decreases
+                        let new_progress = (progress.downloaded_bytes as f32
+                            / progress.total_bytes as f32)
+                            .max(tracker.progress);
+
+                        // Update tracker
+                        tracker.progress = new_progress;
+
+                        // Pass progress and status to the callback
+                        set_progress_clone(new_progress, Some(progress.status), None);
+
+                        // Mark file as exists if we're past 50%
+                        if new_progress > 0.5 {
+                            tracker.file_exists = true;
+                        }
+                    }
+                }
+            } else if progress_tracker_clone.lock().unwrap().file_exists {
+                // Progress file gone but we already saw good progress
+                set_progress_clone(0.99, Some("Finalizing download...".to_string()), None);
+                break;
+            } else {
+                // Progress file doesn't exist yet, continue checking
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
+    });
+
+    // Now actually perform the download
     let download_future = download_with_quality(
         url.clone(),
         format.clone().unwrap_or_else(|| "video".to_string()),
         quality.clone().unwrap_or_else(|| "highest".to_string()),
     );
-
-    // Now actually perform the download
     let result = download_future.await;
+
+    // Try to wait for progress updater to finish or timeout after 2 seconds
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), progress_updater).await;
 
     match result {
         Ok(content) => {
             // For database, we need to save some metadata
-            set_progress(0.9, Some("Saving video file...".to_string()), None);
+            set_progress(0.95, Some("Saving video file...".to_string()), None);
 
             // Since we have the content as Vec<u8>, we need to save it to a file first
             let temp_file = std::env::temp_dir().join(format!(
@@ -590,6 +777,9 @@ pub async fn download_video_with_progress(
 
             // Get file size
             let file_size = content.len() as i64;
+
+            // Update progress to 99%
+            set_progress(0.99, Some("Updating database...".to_string()), None);
 
             // Save download info to database (in background)
             #[cfg(feature = "server")]

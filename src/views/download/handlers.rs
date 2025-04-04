@@ -204,7 +204,87 @@ pub fn execute_download(
             // Start timer for tracking elapsed time
             let start_time = TimeTracker::new();
 
-            // Execute the server function
+            // Create a progress checker task that runs in parallel
+            let url_for_progress = url_clone.clone();
+            let mut simulating_for_progress = simulating.clone();
+            let mut sim_progress_for_progress = sim_progress.clone();
+            let mut status_sig_for_progress = status_sig.clone();
+            let mut sim_eta_for_progress = sim_eta.clone();
+
+            // Start a background task to poll for progress updates
+            let progress_task = spawn({
+                let url = url_for_progress.clone();
+                async move {
+                    // Import GetDownloadProgress function
+                    use crate::server::download::handlers::get_download_progress;
+
+                    // Check progress every 250ms while download is in progress
+                    while simulating_for_progress() {
+                        match get_download_progress(url.clone()).await {
+                            Ok((downloaded, total, eta_seconds, status)) => {
+                                // Calculate progress percentage (0-100)
+                                let progress_pct = if total > 0 {
+                                    ((downloaded as f64 / total as f64) * 100.0) as i32
+                                } else {
+                                    // If total is 0, use the raw downloaded value (assuming 0-100 range)
+                                    downloaded as i32
+                                };
+
+                                // Update UI with real progress
+                                sim_progress_for_progress.set(progress_pct);
+                                status_sig_for_progress.set(Some(status.clone()));
+
+                                // Format ETA
+                                if eta_seconds > 0 {
+                                    use crate::views::download::platforms::format_eta;
+                                    sim_eta_for_progress.set(format_eta(eta_seconds));
+                                }
+                            }
+                            Err(e) => {
+                                // If we can't get progress, just continue - don't update UI
+                                tracing::warn!("Failed to get download progress: {}", e);
+                            }
+                        }
+
+                        // Short delay between progress checks
+                        #[cfg(feature = "web")]
+                        {
+                            use js_sys::Promise;
+                            use wasm_bindgen::prelude::*;
+                            use wasm_bindgen_futures::JsFuture;
+
+                            if let Some(window) = web_sys::window() {
+                                let promise = Promise::new(&mut |resolve, _| {
+                                    let closure = Closure::once_into_js(move || {
+                                        resolve.call0(&JsValue::NULL).unwrap();
+                                    });
+
+                                    let _ = window
+                                        .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                            closure.as_ref().unchecked_ref(),
+                                            250, // 250ms delay
+                                        );
+                                });
+
+                                let _ = JsFuture::from(promise).await;
+                            }
+                        }
+
+                        #[cfg(not(feature = "web"))]
+                        {
+                            use std::time::Duration;
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                        }
+
+                        // Stop checking if we're no longer simulating
+                        if !simulating_for_progress() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Execute the server function to start the actual download
             let result =
                 download_with_quality(url_clone, format_str.clone(), quality_str.clone()).await;
 
@@ -215,7 +295,7 @@ pub fn execute_download(
                 elapsed
             )));
 
-            // Stop simulation
+            // Stop simulation and progress polling
             simulating.set(false);
 
             match result {
@@ -250,13 +330,13 @@ pub fn execute_download(
                     }
                 }
                 Err(e) => {
-                    sim_progress.set(0);
-                    status_sig.set(Some(format!("Download failed after: {:.1}s", elapsed)));
-                    error_signal.set(Some(format!("Download Failed: {}", e)));
+                    // Handle error
+                    error_signal.set(Some(format!("Download failed: {}", e)));
+                    status_sig.set(Some("Download error occurred".into()));
                 }
             }
 
-            // Always ensure loading is set to false
+            // Set loading to false
             loading.set(false);
         }
     });

@@ -71,30 +71,14 @@ pub fn Download() -> Element {
         status.set(Some("Initializing download...".into()));
         download_ready.set(false);
         blob_url.set(None);
-        progress_percent.set(5); // Start at 5% immediately for visual feedback
+        progress_percent.set(0); // Start at 0% for real progress updates
         progress_eta.set("Calculating...".into());
         progress_speed.set(String::new());
 
-        // Set simulating flag to true
+        // Set simulating flag to true to enable progress polling
         simulating.set(true);
 
-        // Start progress simulation
-        let sim_prog = progress_percent.clone();
-        let stat_sig = status.clone();
-        let sim_eta_sig = progress_eta.clone();
-        let err_sig = error.clone();
-
-        simulate_download_progress(
-            &simulating,
-            &sim_prog,
-            &stat_sig,
-            &sim_eta_sig,
-            &format_type(),
-            &quality(),
-            &err_sig,
-        );
-
-        // Execute the actual download
+        // Execute the actual download with real progress updates
         execute_download(
             url().clone(),
             format_type(),
