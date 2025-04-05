@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use components::Navbar;
-use views::{Blog, Download, Downloads, GetInfo, Home};
+use views::{Blog, Download, Downloads, GetInfo, Home, Search};
 
 mod components;
 mod database;
@@ -27,6 +27,8 @@ enum Route {
     Downloads {},
     #[route("/getinfo")]
     GetInfo {},
+    #[route("/search")]
+    Search {},
 }
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");

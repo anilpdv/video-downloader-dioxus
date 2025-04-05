@@ -2,7 +2,7 @@ use crate::Route;
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     icons::{
-        bs_icons::{BsHouseDoorFill, BsInfoCircleFill, BsNewspaper},
+        bs_icons::{BsHouseDoorFill, BsInfoCircleFill, BsNewspaper, BsSearch},
         fa_solid_icons::{FaDownload, FaMusic, FaVideo},
     },
     Icon,
@@ -24,6 +24,7 @@ pub fn Navbar() -> Element {
     let is_download = matches!(route, Route::Download {});
     let is_downloads = matches!(route, Route::Downloads {});
     let is_getinfo = matches!(route, Route::GetInfo {});
+    let is_search = matches!(route, Route::Search {});
 
     rsx! {
         document::Link { rel: "stylesheet", href: NAVBAR_CSS }
@@ -105,6 +106,21 @@ pub fn Navbar() -> Element {
                         }
                         if show_labels() {
                             span { "Download" }
+                        }
+                    }
+                    // Search link (new)
+                    div {
+                        class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
+                        class: if !show_labels() { "justify-center" } else { "" },
+                        class: if is_search { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
+                        onclick: move |_| {
+                            nav.replace(Route::Search {});
+                        },
+                        div { class: if show_labels() { "mr-3" } else { "" },
+                            Icon { icon: BsSearch, width: 20, height: 20 }
+                        }
+                        if show_labels() {
+                            span { "Search" }
                         }
                     }
                     // My Downloads link

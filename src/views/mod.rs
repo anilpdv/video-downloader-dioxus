@@ -12,3 +12,6 @@ pub use getinfo::GetInfo;
 
 pub mod home;
 pub use home::Home;
+
+pub mod search;
+pub use search::Search;
