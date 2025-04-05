@@ -556,7 +556,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                     if play_video() {
                         video {
                             class: "w-full h-full object-cover",
-                            src: "file:///Users/anilpdv/Documents/youtube_downloader/media/Rick%20Astley%20-%20Never%20Gonna%20Give%20You%20Up%20(Official%20Music%20Video).mp4",
+                            src: "{file_path}",
                             alt: "Thumbnail",
                             controls: true,
                             autoplay: true,
@@ -572,7 +572,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                         }
                     }
                 } else {
-                    div { class: "w-full h-full flex items-center justify-center bg-gradient-to-r from-background-darker to-background",
+                    div { class: if !play_video() { "w-full h-full flex items-center justify-center bg-gradient-to-r from-background-darker to-background" } else { "hidden" },
                         if is_audio {
                             Icon {
                                 icon: FaMusic,
@@ -592,7 +592,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                 }
 
                 div {
-                    class: "absolute top-16 right-36 bg-background-darker bg-opacity-75 text-text-primary text-xs  rounded-full flex items-center cursor-pointer p-4",
+                    class: " absolute top-16 right-36 bg-background-darker bg-opacity-75 text-text-primary text-xs  rounded-full flex items-center cursor-pointer p-4",
                     onclick: move |_| play_video.set(!play_video()),
                     if play_video() {
                         Icon {
@@ -612,7 +612,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                 }
 
                 // Format badge
-                div { class: if is_audio { "absolute top-2 right-2 bg-accent-amber bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" } else { "absolute top-2 right-2 bg-accent-teal bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" },
+                div { class: if play_video() { "hidden" } else { "absolute top-2 right-2 bg-accent-teal bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" },
                     if is_audio {
                         Icon {
                             icon: FaMusic,
@@ -643,7 +643,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                 }
 
                 // Quality badge
-                div { class: "absolute bottom-2 left-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full",
+                div { class: if play_video() { "hidden" } else { "absolute bottom-2 left-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full" },
                     "{download.quality}"
                 }
             }

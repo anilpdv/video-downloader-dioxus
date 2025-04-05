@@ -9,11 +9,17 @@ use crate::views::download::platforms::save_to_disk;
 
 // Download Component
 #[component]
-pub fn Download() -> Element {
-    // Form state
-    let mut url = use_signal(String::new);
+pub fn Download(url: String, format: String) -> Element {
+    // Form state - initialize with props if provided
+    let mut url = use_signal(|| url);
     let mut filename = use_signal(String::new);
-    let mut format_type = use_signal(|| FormatType::Video);
+    let mut format_type = use_signal(|| {
+        // Set format type based on the format parameter
+        match format.as_str() {
+            "audio" => FormatType::Audio,
+            _ => FormatType::Video, // Default to video
+        }
+    });
     let mut quality = use_signal(|| Quality::Highest);
 
     // UI state

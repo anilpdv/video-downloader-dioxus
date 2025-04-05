@@ -1,5 +1,6 @@
 use crate::common::Toaster;
 use crate::server::youtube::{download_youtube_video, search_youtube_videos, VideoSearchResult};
+use crate::Route;
 // Import from the public re-exports instead of private modules
 use crate::views::download::{FormatType, Quality};
 use dioxus::prelude::*;
@@ -20,6 +21,7 @@ pub fn Search() -> Element {
     let mut search_results = use_signal(|| Vec::<VideoSearchResult>::new());
     let mut toaster = use_signal(|| None::<Toaster>);
     let mut selected_format = use_signal(|| FormatType::Video);
+    let navigator = use_navigator();
 
     // States for download tracking
     let mut loading = use_signal(|| false);
@@ -54,58 +56,22 @@ pub fn Search() -> Element {
         }
     });
 
-    // Function to handle download requests
+    // Function to handle download requests - navigates to download route
     let mut handle_download = move |video: VideoSearchResult| {
-        // Reset state for new download
-        loading.set(true);
-        error.set(None);
-        status.set(Some("Initializing download...".into()));
-        download_ready.set(false);
-        blob_url.set(None);
-        progress_percent.set(0);
-        progress_eta.set("Calculating...".into());
+        // Get the video URL
+        let video_url = format!("https://www.youtube.com/watch?v={}", video.id);
 
-        // Set download_in_progress flag to enable progress polling
-        download_in_progress.set(true);
+        // Get the format type
+        let format_string = if selected_format() == FormatType::Audio {
+            "audio"
+        } else {
+            "video"
+        };
 
-        // Get required info
-        let video_id = video.id.clone();
-        let title = video.title.clone();
-        let is_audio = selected_format() == FormatType::Audio;
-
-        use_future(move || {
-            let video_id_clone = video_id.clone();
-            let title_clone = title.clone();
-
-            async move {
-                // Use the server function to download
-                match download_youtube_video(video_id_clone, title_clone, is_audio).await {
-                    Ok(message) => {
-                        // Simulate progress for now - in a real implementation,
-                        // you would connect to your actual progress tracking system
-
-                        for i in 1..=10 {
-                            // Sleep using futures-timer
-                            Delay::new(Duration::from_millis(300)).await;
-
-                            progress_percent.set(i * 10);
-                            status.set(Some(format!("Downloading... {}%", i * 10)));
-                        }
-
-                        // Simulate completion
-                        progress_percent.set(100);
-                        status.set(Some(message));
-                        loading.set(false);
-                        download_ready.set(true);
-                        download_in_progress.set(false);
-                    }
-                    Err(e) => {
-                        error.set(Some(format!("Download error: {}", e)));
-                        loading.set(false);
-                        download_in_progress.set(false);
-                    }
-                }
-            }
+        // Navigate to download route with parameters
+        navigator.push(Route::Download {
+            url: video_url,
+            format: format_string.to_string(),
         });
     };
 

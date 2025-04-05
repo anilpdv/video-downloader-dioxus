@@ -19,10 +19,14 @@ enum Route {
     #[layout(Navbar)]
     #[route("/")]
     Home {},
-    #[route("/download")]
-    Download {},
+    
+    // Simple route with URL parameters
+    #[route("/download/:url/:format")]
+    Download { url: String, format: String },
+    
     #[route("/downloads")]
     Downloads {},
+    
     #[route("/search")]
     Search {},
 }

@@ -7,6 +7,7 @@ use dioxus_router::prelude::Link;
 
 #[component]
 pub fn Home() -> Element {
+    const heroImage: Asset = asset!("/assets/hero-image.png");
     rsx! {
         div { class: "min-h-screen flex flex-col",
             // Hero section
@@ -49,7 +50,7 @@ pub fn Home() -> Element {
                 // Illustration/preview
                 div { class: "md:w-1/2 max-w-lg",
                     img {
-                        src: "assets/hero-image.svg",
+                        src: heroImage,
                         alt: "Video Downloader Preview",
                         class: "w-full drop-shadow-lg",
                     }

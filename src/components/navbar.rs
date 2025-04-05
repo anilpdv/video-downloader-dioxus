@@ -20,7 +20,7 @@ pub fn Navbar() -> Element {
 
     // Determine if routes are active based on the current route
     let is_home = matches!(route, Route::Home {});
-    let is_download = matches!(route, Route::Download {});
+    let is_download = matches!(route, Route::Download { url: _, format: _ });
     #[cfg(feature = "desktop")]
     let is_downloads = matches!(route, Route::Downloads {});
     let is_search = matches!(route, Route::Search {});
@@ -83,7 +83,10 @@ pub fn Navbar() -> Element {
                         class: if !show_labels() { "justify-center" } else { "" },
                         class: if is_download { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
                         onclick: move |_| {
-                            nav.replace(Route::Download {});
+                            nav.replace(Route::Download {
+                                url: "".to_string(),
+                                format: "video".to_string(),
+                            });
                         },
                         div { class: if show_labels() { "mr-3" } else { "" },
                             Icon { icon: FaDownload, width: 20, height: 20 }
