@@ -13,7 +13,6 @@ use dioxus_free_icons::{
 };
 use std::collections::HashMap;
 
-// Platform-agnostic download item model for UI
 #[derive(Clone, Debug, PartialEq)]
 pub struct DownloadItem {
     pub id: Option<i64>,
@@ -63,17 +62,14 @@ impl DownloadItem {
     }
 }
 
-// Interface for accessing download data - platform agnostic
 pub mod data_access {
     use super::DownloadItem;
     use crate::components::download_progress::{DownloadInfo, DownloadStatus};
 
-    // For non-web platforms (desktop, iOS, etc.)
     #[cfg(not(feature = "web"))]
     pub async fn fetch_downloads() -> Vec<DownloadItem> {
         #[cfg(feature = "server")]
         {
-            // Call the server-side function directly
             crate::server::download::services::fetch_downloads().await
         }
         #[cfg(not(feature = "server"))]
@@ -82,15 +78,11 @@ pub mod data_access {
         }
     }
 
-    // Web platform implementation
     #[cfg(feature = "web")]
     pub async fn fetch_downloads() -> Vec<DownloadItem> {
-        // Web doesn't support persistent storage in the same way as desktop
-        // Return an empty list or fetch from browser's IndexedDB if implemented
         Vec::new()
     }
 
-    // Open file on non-web platforms
     #[cfg(not(feature = "web"))]
     pub fn open_file(path: &str) {
         #[cfg(feature = "server")]
@@ -99,18 +91,13 @@ pub mod data_access {
         }
     }
 
-    // Create and open a blob URL on web platform
     #[cfg(feature = "web")]
     pub fn open_file(path: &str) {
-        // In a real implementation, you would:
-        // 1. Find the downloaded blob URL associated with this path
-        // 2. Open it in a new tab or trigger browser download
         if let Some(window) = web_sys::window() {
             let _ = window.open_with_url(path);
         }
     }
 
-    // Open containing folder on non-web platforms
     #[cfg(not(feature = "web"))]
     pub fn open_containing_folder(path: &str) {
         #[cfg(feature = "server")]
@@ -119,13 +106,9 @@ pub mod data_access {
         }
     }
 
-    // Web doesn't have folders in the same way
     #[cfg(feature = "web")]
-    pub fn open_containing_folder(_: &str) {
-        // No-op for web
-    }
+    pub fn open_containing_folder(_: &str) {}
 
-    // Download file with progress tracking for web
     #[cfg(feature = "web")]
     pub async fn download_with_progress<F>(
         url: &str,
@@ -143,7 +126,6 @@ pub mod data_access {
         .await
     }
 
-    // Non-web implementation for download with progress
     #[cfg(not(feature = "web"))]
     pub async fn download_with_progress<F>(
         url: &str,
@@ -155,7 +137,6 @@ pub mod data_access {
     {
         #[cfg(feature = "server")]
         {
-            // Create initial download info
             let mut download_info = DownloadInfo {
                 url: url.to_string(),
                 file_name: file_name.to_string(),
@@ -163,28 +144,22 @@ pub mod data_access {
                 ..Default::default()
             };
 
-            // Use video handler for downloads
             use crate::server::download::handlers::video;
 
-            // Call the progress callback with initial status
             on_progress(download_info.clone());
 
-            // Do a simple download without progress for now
-            // In a real app, you would connect to the progress events
             let result = video::download_video(url.to_string())
                 .await
                 .map_err(|e| e.to_string());
 
             match result {
                 Ok(_) => {
-                    // Update download info with completed status
                     download_info.status = DownloadStatus::Completed;
                     download_info.blob_url = Some(format!("/downloads/{}", file_name));
                     on_progress(download_info.clone());
                     Ok(format!("/downloads/{}", file_name))
                 }
                 Err(err) => {
-                    // Update download info with error status
                     download_info.status = DownloadStatus::Failed(err.clone());
                     on_progress(download_info);
                     Err(err)
@@ -199,7 +174,6 @@ pub mod data_access {
     }
 }
 
-// Main download view component
 #[component]
 pub fn Downloads() -> Element {
     rsx! {
@@ -213,21 +187,17 @@ pub fn Downloads() -> Element {
     }
 }
 
-// Content component - handles UI logic separate from data fetching
 #[component]
 fn DownloadsContent() -> Element {
     let active_tab = use_signal(|| "all".to_string());
     let search_query = use_signal(|| String::new());
 
-    // State for downloads
     let downloads = use_signal(|| Vec::<DownloadItem>::new());
     let loading = use_signal(|| true);
 
-    // New state for active downloads with progress
     let active_downloads = use_signal(|| HashMap::<String, DownloadInfo>::new());
     let toaster = use_signal(|| None::<Toaster>);
 
-    // Fetch downloads when component mounts
     use_effect(move || {
         if loading() {
             let mut downloads_clone = downloads.clone();
@@ -241,7 +211,6 @@ fn DownloadsContent() -> Element {
         }
     });
 
-    // Function to handle download requests using atomic references
     let handle_download = move |url: String, filename: String| {
         let downloads_clone = active_downloads.clone();
 
@@ -253,7 +222,6 @@ fn DownloadsContent() -> Element {
             async move {
                 let download_key = format!("{}-{}", url_clone, filename_clone);
 
-                // Create initial download info
                 let initial_info = DownloadInfo {
                     url: url_clone.clone(),
                     file_name: filename_clone.clone(),
@@ -261,12 +229,10 @@ fn DownloadsContent() -> Element {
                     ..Default::default()
                 };
 
-                // Add to active downloads
                 downloads_ref
                     .write()
                     .insert(download_key.clone(), initial_info);
 
-                // Define a callback for progress updates
                 let callback_ref =
                     std::sync::Arc::new(std::sync::Mutex::new(downloads_ref.clone()));
                 let key_ref = download_key.clone();
@@ -276,7 +242,6 @@ fn DownloadsContent() -> Element {
                     let key_clone = key_ref.clone();
                     let callback = callback_ref.clone();
 
-                    // Use a thread-safe approach
                     use dioxus::prelude::spawn;
                     spawn(async move {
                         if let Ok(mut guard) = callback.lock() {
@@ -287,7 +252,6 @@ fn DownloadsContent() -> Element {
                     });
                 };
 
-                // Call the appropriate download function based on platform
                 let _ = data_access::download_with_progress(
                     &url_clone,
                     &filename_clone,
@@ -298,22 +262,18 @@ fn DownloadsContent() -> Element {
         });
     };
 
-    // Show loading state
     if loading() {
         return rsx! {
             LoadingSpinner {}
         };
     }
 
-    // Determine if we have downloads to show
     let has_downloads = !downloads().is_empty();
 
-    // For non-web platforms
     #[cfg(not(feature = "web"))]
     {
         if !has_downloads {
             return rsx! {
-                // Show an informative message for non-web platforms
                 div { class: "text-center py-16 bg-background-card rounded-xl border border-border shadow-md",
                     div { class: "flex justify-center mb-6",
                         Icon {
@@ -332,7 +292,6 @@ fn DownloadsContent() -> Element {
         }
 
         return rsx! {
-            // Show downloads with tabs
             DownloadsGrid {
                 downloads: downloads.clone(),
                 active_tab: active_tab.clone(),
@@ -342,14 +301,12 @@ fn DownloadsContent() -> Element {
     }
 }
 
-// Downloads grid component - separated for reuse
 #[component]
 fn DownloadsGrid(
     downloads: Signal<Vec<DownloadItem>>,
     active_tab: Signal<String>,
     search_query: Signal<String>,
 ) -> Element {
-    // Filter downloads based on active tab and search query
     let filtered_downloads = {
         let query = search_query().to_lowercase();
 
@@ -363,7 +320,6 @@ fn DownloadsGrid(
                 .collect()
         };
 
-        // Apply search filter if query is not empty
         if query.is_empty() {
             tab_filtered
         } else {
@@ -377,7 +333,6 @@ fn DownloadsGrid(
         }
     };
 
-    // Count items by type
     let audio_count = downloads()
         .iter()
         .filter(|d| d.format_type == "audio")
@@ -389,7 +344,6 @@ fn DownloadsGrid(
     let total_count = audio_count + video_count;
 
     rsx! {
-        // Search bar
         div { class: "mb-6 relative",
             div { class: "relative",
                 span { class: "absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none",
@@ -410,10 +364,8 @@ fn DownloadsGrid(
             }
         }
 
-        // Tab navigation
         div { class: "mb-6 border-b border-border",
             div { class: "flex flex-wrap -mb-px",
-                // All tab
                 button {
                     class: if active_tab() == "all" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                     onclick: move |_| active_tab.set("all".to_string()),
@@ -426,7 +378,6 @@ fn DownloadsGrid(
                     "All ({total_count})"
                 }
 
-                // Audio tab
                 button {
                     class: if active_tab() == "audio" { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 mr-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                     onclick: move |_| active_tab.set("audio".to_string()),
@@ -439,7 +390,6 @@ fn DownloadsGrid(
                     "Audio ({audio_count})"
                 }
 
-                // Video tab
                 button {
                     class: if active_tab() == "video" { "inline-flex items-center py-3 px-4 text-sm font-medium text-accent-teal border-b-2 border-accent-teal rounded-t-lg" } else { "inline-flex items-center py-3 px-4 text-sm font-medium text-text-muted border-b-2 border-transparent hover:text-text-secondary hover:border-border rounded-t-lg" },
                     onclick: move |_| active_tab.set("video".to_string()),
@@ -454,7 +404,6 @@ fn DownloadsGrid(
             }
         }
 
-        // No files found message when filter is applied
         if filtered_downloads.is_empty() {
             div { class: "text-center py-12 bg-background-card rounded-xl border border-border shadow-md",
                 if !search_query().is_empty() {
@@ -504,7 +453,6 @@ fn DownloadsGrid(
                 }
             }
         } else {
-            // Grid display of downloads
             div { class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6",
                 for download in filtered_downloads {
                     DownloadCard { download }
@@ -514,7 +462,6 @@ fn DownloadsGrid(
     }
 }
 
-// Simple loading spinner component
 #[component]
 fn LoadingSpinner() -> Element {
     rsx! {
@@ -539,10 +486,8 @@ fn LoadingSpinner() -> Element {
     }
 }
 
-// Download card component - separated from server logic
 #[component]
 fn DownloadCard(download: DownloadItem) -> Element {
-    let is_video = &download.format_type == "video";
     let is_audio = &download.format_type == "audio";
     let mut play_video = use_signal(|| false);
     tracing::info!("play_video: {}", download.file_path);
@@ -550,7 +495,6 @@ fn DownloadCard(download: DownloadItem) -> Element {
 
     rsx! {
         div { class: "bg-background-card rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-all duration-300 border border-border transform hover:-translate-y-1 hover:border-border-light",
-            // Thumbnail area
             div { class: "relative aspect-video bg-background-dark",
                 if let Some(ref thumbnail) = download.thumbnail_url {
                     if play_video() {
@@ -611,7 +555,6 @@ fn DownloadCard(download: DownloadItem) -> Element {
                     }
                 }
 
-                // Format badge
                 div { class: if play_video() { "hidden" } else { "absolute top-2 right-2 bg-accent-teal bg-opacity-90 text-text-invert text-xs px-2 py-1 rounded-full flex items-center" },
                     if is_audio {
                         Icon {
@@ -635,27 +578,22 @@ fn DownloadCard(download: DownloadItem) -> Element {
                     }
                 }
 
-                // Duration badge
                 if let Some(_) = download.duration {
                     div { class: "absolute bottom-2 right-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full",
                         "{download.format_duration()}"
                     }
                 }
 
-                // Quality badge
                 div { class: if play_video() { "hidden" } else { "absolute bottom-2 left-2 bg-background-darker bg-opacity-75 text-text-primary text-xs px-2 py-1 rounded-full" },
                     "{download.quality}"
                 }
             }
 
-            // Details section
             div { class: "p-4",
-                // Title
                 h3 { class: "font-medium text-lg mb-2 line-clamp-2 text-text-primary",
                     "{download.title}"
                 }
 
-                // Info row
                 div { class: "flex justify-between text-sm text-text-muted mb-4",
                     div { class: "flex items-center",
                         Icon {
@@ -677,10 +615,8 @@ fn DownloadCard(download: DownloadItem) -> Element {
                     }
                 }
 
-                // Action buttons
                 div { class: "flex space-x-2 mt-3",
                     if download.file_exists {
-                        // Play button
                         button {
                             class: "flex-1 bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
                             onclick: {
@@ -690,7 +626,6 @@ fn DownloadCard(download: DownloadItem) -> Element {
                             "Play"
                         }
 
-                        // Open folder button
                         button {
                             class: "bg-background-medium hover:bg-background-hover text-text-primary py-2 px-3 rounded-lg text-sm transition-colors duration-200 flex items-center justify-center shadow-sm",
                             onclick: {

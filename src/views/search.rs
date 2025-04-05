@@ -1,8 +1,7 @@
 use crate::common::Toaster;
-use crate::server::youtube::{download_youtube_video, search_youtube_videos, VideoSearchResult};
+use crate::server::youtube::{search_youtube_videos, VideoSearchResult};
+use crate::views::download::FormatType;
 use crate::Route;
-// Import from the public re-exports instead of private modules
-use crate::views::download::{FormatType, Quality};
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     icons::{
@@ -11,8 +10,6 @@ use dioxus_free_icons::{
     },
     Icon,
 };
-use futures_timer::Delay;
-use std::time::Duration;
 
 #[component]
 pub fn Search() -> Element {
@@ -24,15 +21,15 @@ pub fn Search() -> Element {
     let navigator = use_navigator();
 
     // States for download tracking
-    let mut loading = use_signal(|| false);
-    let mut status = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
-    let mut download_ready = use_signal(|| false);
-    let download_data = use_signal(|| None::<Vec<u8>>);
-    let mut blob_url = use_signal(|| None::<String>);
-    let mut progress_percent = use_signal(|| 0);
-    let mut progress_eta = use_signal(|| String::new());
-    let mut download_in_progress = use_signal(|| false);
+    let loading = use_signal(|| false);
+    let status = use_signal(|| None::<String>);
+    let error = use_signal(|| None::<String>);
+    let download_ready = use_signal(|| false);
+    // let download_data = use_signal(|| None::<Vec<u8>>);
+    // let blob_url = use_signal(|| None::<String>);
+    let progress_percent = use_signal(|| 0);
+    let progress_eta = use_signal(|| String::new());
+    // let download_in_progress = use_signal(|| false);
 
     let mut search_result =
         use_resource(
@@ -57,7 +54,7 @@ pub fn Search() -> Element {
     });
 
     // Function to handle download requests - navigates to download route
-    let mut handle_download = move |video: VideoSearchResult| {
+    let handle_download = move |video: VideoSearchResult| {
         // Get the video URL
         let video_url = format!("https://www.youtube.com/watch?v={}", video.id);
 

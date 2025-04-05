@@ -7,12 +7,10 @@ use dioxus_router::prelude::Link;
 
 #[component]
 pub fn Home() -> Element {
-    const heroImage: Asset = asset!("/assets/hero-image.png");
+    const HERO_IMAGE: Asset = asset!("/assets/hero-image.png");
     rsx! {
         div { class: "min-h-screen flex flex-col",
-            // Hero section
             div { class: "container mx-auto px-4 py-20 flex flex-col md:flex-row items-center justify-between",
-                // Text content
                 div { class: "md:w-1/2 mb-10 md:mb-0 text-center md:text-left",
                     h1 { class: "text-4xl md:text-5xl font-bold mb-6 text-text-primary",
                         "Download Videos & Audio"
@@ -47,24 +45,21 @@ pub fn Home() -> Element {
                     }
                 }
 
-                // Illustration/preview
                 div { class: "md:w-1/2 max-w-lg",
                     img {
-                        src: heroImage,
+                        src: HERO_IMAGE,
                         alt: "Video Downloader Preview",
                         class: "w-full drop-shadow-lg",
                     }
                 }
             }
 
-            // Features section
             div { class: "bg-background-card border-t border-b border-border py-16",
                 div { class: "container mx-auto px-4",
                     h2 { class: "text-3xl font-bold text-center mb-12 text-text-primary",
                         "Key Features"
                     }
                     div { class: "grid grid-cols-1 md:grid-cols-3 gap-8",
-                        // Feature 1
                         div { class: "p-6 rounded-xl border border-border bg-background-medium shadow-sm",
                             div { class: "w-12 h-12 bg-accent-teal bg-opacity-20 rounded-full flex items-center justify-center mb-4",
                                 span { class: "text-accent-teal text-2xl", "🎬" }
@@ -77,7 +72,6 @@ pub fn Home() -> Element {
                             }
                         }
 
-                        // Feature 2
                         div { class: "p-6 rounded-xl border border-border bg-background-medium shadow-sm",
                             div { class: "w-12 h-12 bg-accent-amber bg-opacity-20 rounded-full flex items-center justify-center mb-4",
                                 span { class: "text-accent-amber text-2xl", "⚡" }
@@ -90,7 +84,6 @@ pub fn Home() -> Element {
                             }
                         }
 
-                        // Feature 3
                         div { class: "p-6 rounded-xl border border-border bg-background-medium shadow-sm",
                             div { class: "w-12 h-12 bg-accent-rose bg-opacity-20 rounded-full flex items-center justify-center mb-4",
                                 span { class: "text-accent-rose text-2xl", "🔒" }
@@ -106,13 +99,11 @@ pub fn Home() -> Element {
                 }
             }
 
-            // How it works section
             div { class: "container mx-auto px-4 py-16",
                 h2 { class: "text-3xl font-bold text-center mb-12 text-text-primary",
                     "How It Works"
                 }
                 div { class: "max-w-3xl mx-auto",
-                    // Step 1
                     div { class: "flex flex-col md:flex-row items-center mb-12",
                         div { class: "md:w-16 w-12 h-12 md:h-16 rounded-full bg-accent-teal bg-opacity-20 flex items-center justify-center flex-shrink-0 mb-4 md:mb-0 md:mr-6",
                             span { class: "text-accent-teal text-2xl font-bold", "1" }
@@ -127,7 +118,6 @@ pub fn Home() -> Element {
                         }
                     }
 
-                    // Step 2
                     div { class: "flex flex-col md:flex-row items-center mb-12",
                         div { class: "md:w-16 w-12 h-12 md:h-16 rounded-full bg-accent-teal bg-opacity-20 flex items-center justify-center flex-shrink-0 mb-4 md:mb-0 md:mr-6",
                             span { class: "text-accent-teal text-2xl font-bold", "2" }
@@ -142,7 +132,6 @@ pub fn Home() -> Element {
                         }
                     }
 
-                    // Step 3
                     div { class: "flex flex-col md:flex-row items-center",
                         div { class: "md:w-16 w-12 h-12 md:h-16 rounded-full bg-accent-teal bg-opacity-20 flex items-center justify-center flex-shrink-0 mb-4 md:mb-0 md:mr-6",
                             span { class: "text-accent-teal text-2xl font-bold", "3" }
@@ -159,7 +148,6 @@ pub fn Home() -> Element {
                 }
             }
 
-            // CTA section
             div { class: "bg-background-card border-t border-border py-16",
                 div { class: "container mx-auto px-4 text-center",
                     h2 { class: "text-3xl font-bold mb-6 text-text-primary", "Ready to Download?" }
