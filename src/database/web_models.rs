@@ -1,8 +1,7 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "server")]
-use time::OffsetDateTime;
 
-/// Represents a downloaded video in the database
+/// Represents a downloaded video for web platform
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Download {
     /// Unique identifier
@@ -22,10 +21,6 @@ pub struct Download {
     /// File size in bytes
     pub file_size: Option<i64>,
     /// When the file was downloaded
-    #[cfg(feature = "server")]
-    #[serde(with = "time::serde::timestamp::option")]
-    pub download_date: Option<OffsetDateTime>,
-    #[cfg(not(feature = "server"))]
     pub download_date: Option<String>,
     /// URL to video thumbnail
     pub thumbnail_url: Option<String>,
@@ -37,36 +32,6 @@ pub struct Download {
 
 impl Download {
     /// Create a new download record
-    #[cfg(feature = "server")]
-    pub fn new(
-        url: String,
-        title: Option<String>,
-        filename: String,
-        file_path: String,
-        format_type: String,
-        quality: String,
-        file_size: Option<i64>,
-        thumbnail_url: Option<String>,
-        video_id: Option<String>,
-        duration: Option<i64>,
-    ) -> Self {
-        Self {
-            id: None,
-            url,
-            title,
-            filename,
-            file_path,
-            format_type,
-            quality,
-            file_size,
-            download_date: Some(OffsetDateTime::now_utc()),
-            thumbnail_url,
-            video_id,
-            duration,
-        }
-    }
-
-    #[cfg(not(feature = "server"))]
     pub fn new(
         url: String,
         title: Option<String>,
@@ -164,32 +129,15 @@ impl Download {
     }
 
     /// Format the download date as a readable string
-    #[cfg(feature = "server")]
-    pub fn format_date(&self) -> String {
-        if let Some(date) = self.download_date {
-            // Format as "Mon, 01 Jan 2023 14:30"
-            time::format_description::parse(
-                "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]",
-            )
-            .map(|fmt| {
-                date.format(&fmt)
-                    .unwrap_or_else(|_| "Invalid date".to_string())
-            })
-            .unwrap_or_else(|_| "Invalid date".to_string())
-        } else {
-            "Unknown date".to_string()
-        }
-    }
-
-    #[cfg(not(feature = "server"))]
     pub fn format_date(&self) -> String {
         self.download_date
             .clone()
             .unwrap_or_else(|| "Unknown date".to_string())
     }
 
-    /// Check if the file exists on disk
+    /// Check if the file exists on disk - always false for web
     pub fn file_exists(&self) -> bool {
-        std::path::Path::new(&self.file_path).exists()
+        // For web, we'll assume the blob URL is valid if it exists
+        self.file_path.starts_with("blob:") || self.file_path.starts_with("http")
     }
 }

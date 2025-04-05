@@ -10,6 +10,9 @@ mod database;
 mod server;
 mod views;
 
+// Add the common module to the root
+pub mod common;
+
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
 enum Route {

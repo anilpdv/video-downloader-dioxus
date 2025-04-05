@@ -12,7 +12,7 @@ pub fn create_blob_url(data: &[u8], mime_type: &str) -> Option<String> {
     array.push(&uint8_array.buffer().into());
 
     let mut blob_options = BlobPropertyBag::new();
-    blob_options.type_(mime_type);
+    blob_options.set_type(mime_type);
 
     Blob::new_with_u8_array_sequence_and_options(&array, &blob_options)
         .ok()

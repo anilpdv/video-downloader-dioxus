@@ -1,3 +1,6 @@
+use crate::common::Toaster;
+use crate::components::download_progress::{DownloadInfo, DownloadStatus};
+use dioxus::prelude::Signal;
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     icons::{
@@ -7,6 +10,7 @@ use dioxus_free_icons::{
     },
     Icon,
 };
+use std::collections::HashMap;
 
 // Platform-agnostic download item model for UI
 #[derive(Clone, Debug, PartialEq)]
@@ -61,32 +65,137 @@ impl DownloadItem {
 // Interface for accessing download data - platform agnostic
 pub mod data_access {
     use super::DownloadItem;
+    use crate::components::download_progress::{DownloadInfo, DownloadStatus};
 
-    #[cfg(feature = "server")]
+    // For non-web platforms (desktop, iOS, etc.)
+    #[cfg(not(feature = "web"))]
     pub async fn fetch_downloads() -> Vec<DownloadItem> {
-        crate::server::download::fetch_downloads().await
+        #[cfg(feature = "server")]
+        {
+            // Call the server-side function directly
+            crate::server::download::services::fetch_downloads().await
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            Vec::new()
+        }
     }
 
-    #[cfg(not(feature = "server"))]
+    // Web platform implementation
+    #[cfg(feature = "web")]
     pub async fn fetch_downloads() -> Vec<DownloadItem> {
-        Vec::new() // Empty implementation for non-server platforms
+        // Web doesn't support persistent storage in the same way as desktop
+        // Return an empty list or fetch from browser's IndexedDB if implemented
+        Vec::new()
     }
 
-    #[cfg(feature = "server")]
+    // Open file on non-web platforms
+    #[cfg(not(feature = "web"))]
     pub fn open_file(path: &str) {
-        crate::server::download::open_file(path);
+        #[cfg(feature = "server")]
+        {
+            let _ = crate::server::download::services::open_file(path);
+        }
     }
 
-    #[cfg(feature = "server")]
+    // Create and open a blob URL on web platform
+    #[cfg(feature = "web")]
+    pub fn open_file(path: &str) {
+        // In a real implementation, you would:
+        // 1. Find the downloaded blob URL associated with this path
+        // 2. Open it in a new tab or trigger browser download
+        if let Some(window) = web_sys::window() {
+            let _ = window.open_with_url(path);
+        }
+    }
+
+    // Open containing folder on non-web platforms
+    #[cfg(not(feature = "web"))]
     pub fn open_containing_folder(path: &str) {
-        crate::server::download::open_containing_folder(path);
+        #[cfg(feature = "server")]
+        {
+            let _ = crate::server::download::services::open_containing_folder(path);
+        }
     }
 
-    #[cfg(not(feature = "server"))]
-    pub fn open_file(_: &str) {}
+    // Web doesn't have folders in the same way
+    #[cfg(feature = "web")]
+    pub fn open_containing_folder(_: &str) {
+        // No-op for web
+    }
 
-    #[cfg(not(feature = "server"))]
-    pub fn open_containing_folder(_: &str) {}
+    // Download file with progress tracking for web
+    #[cfg(feature = "web")]
+    pub async fn download_with_progress<F>(
+        url: &str,
+        file_name: &str,
+        on_progress: F,
+    ) -> Result<String, String>
+    where
+        F: Fn(DownloadInfo) + 'static,
+    {
+        crate::server::download::web_services::download_with_progress_real(
+            url,
+            file_name,
+            on_progress,
+        )
+        .await
+    }
+
+    // Non-web implementation for download with progress
+    #[cfg(not(feature = "web"))]
+    pub async fn download_with_progress<F>(
+        url: &str,
+        file_name: &str,
+        on_progress: F,
+    ) -> Result<String, String>
+    where
+        F: Fn(DownloadInfo) + 'static,
+    {
+        #[cfg(feature = "server")]
+        {
+            // Create initial download info
+            let mut download_info = DownloadInfo {
+                url: url.to_string(),
+                file_name: file_name.to_string(),
+                status: DownloadStatus::Downloading,
+                ..Default::default()
+            };
+
+            // Use video handler for downloads
+            use crate::server::download::handlers::video;
+
+            // Call the progress callback with initial status
+            on_progress(download_info.clone());
+
+            // Do a simple download without progress for now
+            // In a real app, you would connect to the progress events
+            let result = video::download_video(url.to_string())
+                .await
+                .map_err(|e| e.to_string());
+
+            match result {
+                Ok(_) => {
+                    // Update download info with completed status
+                    download_info.status = DownloadStatus::Completed;
+                    download_info.blob_url = Some(format!("/downloads/{}", file_name));
+                    on_progress(download_info.clone());
+                    Ok(format!("/downloads/{}", file_name))
+                }
+                Err(err) => {
+                    // Update download info with error status
+                    download_info.status = DownloadStatus::Failed(err.clone());
+                    on_progress(download_info);
+                    Err(err)
+                }
+            }
+        }
+
+        #[cfg(not(feature = "server"))]
+        {
+            Err("Download not supported on this platform".to_string())
+        }
+    }
 }
 
 // Main download view component
@@ -113,6 +222,10 @@ fn DownloadsContent() -> Element {
     let downloads = use_signal(|| Vec::<DownloadItem>::new());
     let mut loading = use_signal(|| true);
 
+    // New state for active downloads with progress
+    let active_downloads = use_signal(|| HashMap::<String, DownloadInfo>::new());
+    let toaster = use_signal(|| None::<Toaster>);
+
     // Fetch downloads when component mounts
     use_effect(move || {
         if loading() {
@@ -127,6 +240,63 @@ fn DownloadsContent() -> Element {
         }
     });
 
+    // Function to handle download requests using atomic references
+    let handle_download = move |url: String, filename: String| {
+        let downloads_clone = active_downloads.clone();
+
+        use_future(move || {
+            let mut downloads_ref = downloads_clone.clone();
+            let url_clone = url.clone();
+            let filename_clone = filename.clone();
+
+            async move {
+                let download_key = format!("{}-{}", url_clone, filename_clone);
+
+                // Create initial download info
+                let initial_info = DownloadInfo {
+                    url: url_clone.clone(),
+                    file_name: filename_clone.clone(),
+                    status: DownloadStatus::NotStarted,
+                    ..Default::default()
+                };
+
+                // Add to active downloads
+                downloads_ref
+                    .write()
+                    .insert(download_key.clone(), initial_info);
+
+                // Define a callback for progress updates
+                let callback_ref =
+                    std::sync::Arc::new(std::sync::Mutex::new(downloads_ref.clone()));
+                let key_ref = download_key.clone();
+
+                let progress_callback = move |info: DownloadInfo| {
+                    let info_copy = info.clone();
+                    let key_clone = key_ref.clone();
+                    let callback = callback_ref.clone();
+
+                    // Use a thread-safe approach
+                    use dioxus::prelude::spawn;
+                    spawn(async move {
+                        if let Ok(mut guard) = callback.lock() {
+                            guard.with_mut(|map| {
+                                map.insert(key_clone, info_copy);
+                            });
+                        }
+                    });
+                };
+
+                // Call the appropriate download function based on platform
+                let _ = data_access::download_with_progress(
+                    &url_clone,
+                    &filename_clone,
+                    progress_callback,
+                )
+                .await;
+            }
+        });
+    };
+
     // Show loading state
     if loading() {
         return rsx! {
@@ -137,6 +307,172 @@ fn DownloadsContent() -> Element {
     // Determine if we have downloads to show
     let has_downloads = !downloads().is_empty();
 
+    // If we're on web, show a demo section even if no downloads
+    #[cfg(feature = "web")]
+    {
+        return rsx! {
+            // Demo section for web
+            div { class: "mb-10",
+                // Show active downloads if any
+                {
+                    if !active_downloads().is_empty() {
+                        rsx! {
+                            div { class: "mb-8",
+                                h2 { class: "text-xl font-semibold mb-4", "Active Downloads" }
+                            
+                                {
+                                    let downloads_map = active_downloads();
+                                    downloads_map
+                                        .iter()
+                                        .map(|(_, info)| {
+                                            let info_clone = info.clone();
+                                            let url_clone = info.url.clone();
+                                            let filename_clone = info.file_name.clone();
+                                            rsx! {
+                                                crate::components::DownloadProgress {
+                                                    download_info: Signal::new(info_clone),
+                                                    on_download_click: move |_| { handle_download(url_clone.clone(), filename_clone.clone()) },
+                                                }
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                }
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            div { class: "text-center py-12 bg-background-card rounded-xl border border-border shadow-md mb-10",
+                                div { class: "flex justify-center mb-6",
+                                    Icon {
+                                        icon: FaDownload,
+                                        width: 52,
+                                        height: 52,
+                                        class: "text-text-muted",
+                                    }
+                                }
+                                p { class: "text-xl font-medium text-text-primary", "Try downloading a sample file" }
+                                p { class: "text-text-secondary mt-2 max-w-md mx-auto",
+                                    "This web demo can download and save files to your device. Try one of the samples below:"
+                                }
+                            
+                                div { class: "mt-6 flex flex-col md:flex-row justify-center gap-3",
+                                    // Short video sample
+                                    button {
+                                        class: "bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
+                                        onclick: move |_| handle_download(
+                                            "https://download.samplelib.com/mp4/sample-5s.mp4".to_string(),
+                                            "sample-video-short.mp4".to_string(),
+                                        ),
+                                        Icon {
+                                            icon: FaVideo,
+                                            width: 18,
+                                            height: 18,
+                                            class: "mr-2",
+                                        }
+                                        "Short Video (5s)"
+                                    }
+                            
+                                    // Medium video sample
+                                    button {
+                                        class: "bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
+                                        onclick: move |_| handle_download(
+                                            "https://download.samplelib.com/mp4/sample-15s.mp4".to_string(),
+                                            "sample-video-medium.mp4".to_string(),
+                                        ),
+                                        Icon {
+                                            icon: FaVideo,
+                                            width: 18,
+                                            height: 18,
+                                            class: "mr-2",
+                                        }
+                                        "Medium Video (15s)"
+                                    }
+                            
+                                    // Audio sample
+                                    button {
+                                        class: "bg-accent-amber hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
+                                        onclick: move |_| handle_download(
+                                            "https://download.samplelib.com/mp3/sample-3s.mp3".to_string(),
+                                            "sample-audio.mp3".to_string(),
+                                        ),
+                                        Icon {
+                                            icon: FaMusic,
+                                            width: 18,
+                                            height: 18,
+                                            class: "mr-2",
+                                        }
+                                        "Audio Sample (3s)"
+                                    }
+                                }
+                            
+                                p { class: "text-text-secondary text-xs mt-4",
+                                    "Sample files from SampleLib.com - https://samplelib.com/"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Regular downloads section (if any)
+                {
+                    if has_downloads {
+                        rsx! {
+                            DownloadsGrid {
+                                downloads: downloads.clone(),
+                                active_tab: active_tab.clone(),
+                                search_query: search_query.clone(),
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
+            }
+        };
+    }
+
+    // For non-web platforms
+    #[cfg(not(feature = "web"))]
+    {
+        if !has_downloads {
+            return rsx! {
+                // Show an informative message for non-web platforms
+                div { class: "text-center py-16 bg-background-card rounded-xl border border-border shadow-md",
+                    div { class: "flex justify-center mb-6",
+                        Icon {
+                            icon: FaDownload,
+                            width: 52,
+                            height: 52,
+                            class: "text-text-muted",
+                        }
+                    }
+                    p { class: "text-xl font-medium text-text-primary", "No downloads yet" }
+                    p { class: "text-text-secondary mt-2 max-w-md mx-auto",
+                        "Your downloaded files will appear here. Try downloading a video or audio file from the home page."
+                    }
+                }
+            };
+        }
+
+        return rsx! {
+            // Show downloads with tabs
+            DownloadsGrid {
+                downloads: downloads.clone(),
+                active_tab: active_tab.clone(),
+                search_query: search_query.clone(),
+            }
+        };
+    }
+}
+
+// Downloads grid component - separated for reuse
+#[component]
+fn DownloadsGrid(
+    downloads: Signal<Vec<DownloadItem>>,
+    active_tab: Signal<String>,
+    search_query: Signal<String>,
+) -> Element {
     // Filter downloads based on active tab and search query
     let filtered_downloads = {
         let query = search_query().to_lowercase();
@@ -176,40 +512,6 @@ fn DownloadsContent() -> Element {
         .count();
     let total_count = audio_count + video_count;
 
-    if !has_downloads {
-        return rsx! {
-            // Show an informative message based on platform
-            div { class: "text-center py-16 bg-background-card rounded-xl border border-border shadow-md",
-                div { class: "flex justify-center mb-6",
-                    Icon {
-                        icon: FaDownload,
-                        width: 52,
-                        height: 52,
-                        class: "text-text-muted",
-                    }
-                }
-                {
-                    if cfg!(feature = "server") {
-                        rsx! {
-                            p { class: "text-xl font-medium text-text-primary", "No downloads yet" }
-                            p { class: "text-text-secondary mt-2 max-w-md mx-auto",
-                                "Your downloaded files will appear here. Try downloading a video or audio file from the home page."
-                            }
-                        }
-                    } else {
-                        rsx! {
-                            p { class: "text-xl font-medium text-text-secondary", "Download history is not available in web mode" }
-                            p { class: "text-text-muted mt-2",
-                                "For full functionality including download history, please use the desktop app."
-                            }
-                        }
-                    }
-                }
-            }
-        };
-    }
-
-    // Show downloads with tabs
     rsx! {
         // Search bar
         div { class: "mb-6 relative",

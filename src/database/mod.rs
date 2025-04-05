@@ -3,10 +3,16 @@ pub mod models;
 #[cfg(feature = "server")]
 pub mod schema;
 
+#[cfg(feature = "web")]
+pub mod web_models;
+
 #[cfg(feature = "server")]
 pub use models::*;
 #[cfg(feature = "server")]
 pub use schema::*;
+
+#[cfg(feature = "web")]
+pub use web_models::*;
 
 #[cfg(feature = "server")]
 use sqlx::{sqlite::SqlitePool, Executor, Pool, Sqlite};

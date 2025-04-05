@@ -1,8 +1,8 @@
-mod hero;
-pub use hero::Hero;
+pub mod download_progress;
+mod echo;
+
+pub use download_progress::*;
+pub use echo::Echo;
 
 mod navbar;
-pub use navbar::Navbar;
-
-mod echo;
-pub use echo::Echo;
+pub use navbar::*;

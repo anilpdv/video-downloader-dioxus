@@ -131,10 +131,18 @@ pub fn execute_download(
                     use crate::server::download::handlers::get_download_progress;
                     use crate::views::download::platforms::format_eta;
 
-                    // Poll interval - check every second
+                    // Poll interval - check every second (in milliseconds for web)
+                    #[cfg(feature = "web")]
+                    let poll_interval_ms = 1000;
+
+                    #[cfg(not(feature = "web"))]
                     let poll_interval = std::time::Duration::from_millis(1000);
 
-                    // Store time-based progress information
+                    // Store time-based progress information using platform-specific time tracking
+                    #[cfg(feature = "web")]
+                    let start_time_ms = js_sys::Date::now();
+
+                    #[cfg(not(feature = "web"))]
                     let start_time = std::time::Instant::now();
 
                     // Define time-based progress stages with fixed percentages
@@ -164,12 +172,18 @@ pub fn execute_download(
 
                     // Track download state
                     let mut current_progress = 0;
-                    let mut last_status_update = std::time::Instant::now();
                     let mut last_status = String::new();
                     let mut download_complete = false;
 
                     // Track when we can assume the download is complete
                     let mut seen_backend_complete = false;
+
+                    // Platform-specific time tracking for last status update
+                    #[cfg(feature = "web")]
+                    let mut last_status_update_ms = js_sys::Date::now();
+
+                    #[cfg(not(feature = "web"))]
+                    let mut last_status_update = std::time::Instant::now();
 
                     // Keep polling while download is in progress
                     while download_in_progress_for_polling() {
@@ -183,6 +197,10 @@ pub fn execute_download(
                         };
 
                         // Calculate time-based progress first
+                        #[cfg(feature = "web")]
+                        let elapsed_secs = (js_sys::Date::now() - start_time_ms) / 1000.0;
+
+                        #[cfg(not(feature = "web"))]
                         let elapsed_secs = start_time.elapsed().as_secs_f64();
 
                         // Find appropriate stage based on elapsed time
@@ -217,9 +235,16 @@ pub fn execute_download(
                                 seen_backend_complete = true;
                             }
 
+                            // Calculate elapsed time for status update checks
+                            #[cfg(feature = "web")]
+                            let status_elapsed_secs =
+                                (js_sys::Date::now() - last_status_update_ms) / 1000.0;
+
+                            #[cfg(not(feature = "web"))]
+                            let status_elapsed_secs = last_status_update.elapsed().as_secs() as f64;
+
                             // Use the status for messages but ignore backend percentage jumps
-                            if status != last_status && last_status_update.elapsed().as_secs() >= 2
-                            {
+                            if status != last_status && status_elapsed_secs >= 2.0 {
                                 // Clean up status message and remove any existing percentages
                                 let clean_status = if status.contains("%") {
                                     // Remove any existing percentage in the status
@@ -260,7 +285,16 @@ pub fn execute_download(
 
                                 status_sig_for_polling.set(Some(status_msg));
                                 last_status = status;
-                                last_status_update = std::time::Instant::now();
+
+                                #[cfg(feature = "web")]
+                                {
+                                    last_status_update_ms = js_sys::Date::now();
+                                }
+
+                                #[cfg(not(feature = "web"))]
+                                {
+                                    last_status_update = std::time::Instant::now();
+                                }
                             }
 
                             // Format ETA if available
@@ -298,12 +332,21 @@ pub fn execute_download(
                                 current_progress = new_time_progress;
                                 progress_percent_for_polling.set(current_progress);
 
+                                // Calculate elapsed time for milestone checks
+                                #[cfg(feature = "web")]
+                                let milestone_elapsed_secs =
+                                    (js_sys::Date::now() - last_status_update_ms) / 1000.0;
+
+                                #[cfg(not(feature = "web"))]
+                                let milestone_elapsed_secs =
+                                    last_status_update.elapsed().as_secs() as f64;
+
                                 // For certain milestone percentages, update status message
                                 if (current_progress == 25
                                     || current_progress == 50
                                     || current_progress == 75
                                     || current_progress == 85)
-                                    && last_status_update.elapsed().as_secs() >= 2
+                                    && milestone_elapsed_secs >= 2.0
                                 {
                                     let milestone_message = match current_progress {
                                         25 => "Downloading video... (25%)",
@@ -317,21 +360,47 @@ pub fn execute_download(
                                         milestone_message
                                             .replace("{}", &current_progress.to_string()),
                                     ));
-                                    last_status_update = std::time::Instant::now();
+
+                                    #[cfg(feature = "web")]
+                                    {
+                                        last_status_update_ms = js_sys::Date::now();
+                                    }
+
+                                    #[cfg(not(feature = "web"))]
+                                    {
+                                        last_status_update = std::time::Instant::now();
+                                    }
                                 }
                             }
+
+                            // Calculate elapsed time for stuck download check
+                            #[cfg(feature = "web")]
+                            let stuck_elapsed_secs =
+                                (js_sys::Date::now() - last_status_update_ms) / 1000.0;
+
+                            #[cfg(not(feature = "web"))]
+                            let stuck_elapsed_secs = last_status_update.elapsed().as_secs() as f64;
 
                             // Additional check for stuck downloads - if we've been at a high percentage for too long
                             if current_progress >= 85
                                 && !seen_backend_complete
-                                && last_status_update.elapsed().as_secs() >= 5
+                                && stuck_elapsed_secs >= 5.0
                             {
                                 // Update status to indicate we're still working
                                 status_sig_for_polling.set(Some(format!(
                                     "Processing video... ({}%)",
                                     current_progress
                                 )));
-                                last_status_update = std::time::Instant::now();
+
+                                #[cfg(feature = "web")]
+                                {
+                                    last_status_update_ms = js_sys::Date::now();
+                                }
+
+                                #[cfg(not(feature = "web"))]
+                                {
+                                    last_status_update = std::time::Instant::now();
+                                }
                             }
                         }
 
@@ -351,7 +420,7 @@ pub fn execute_download(
                                     let _ = window
                                         .set_timeout_with_callback_and_timeout_and_arguments_0(
                                             closure.as_ref().unchecked_ref(),
-                                            poll_interval.as_millis() as i32,
+                                            poll_interval_ms,
                                         );
                                 });
 

@@ -1,3 +1,4 @@
+#[cfg(feature = "server")]
 use crate::database::models::Download;
 use sqlx::Row;
 use sqlx::{Pool, Sqlite};

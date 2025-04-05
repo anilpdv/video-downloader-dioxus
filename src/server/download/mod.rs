@@ -1,8 +1,14 @@
 // Download functionality module
 
 // Export our services for download operations
-mod services;
+pub mod services;
 pub use services::*;
+
+// Web-specific services
+#[cfg(feature = "web")]
+pub mod web_services;
+#[cfg(feature = "web")]
+pub use web_services::*;
 
 // Types
 pub mod types;
