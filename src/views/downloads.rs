@@ -44,16 +44,15 @@ fn ServerContent() -> Element {
         cfg!(feature = "desktop"), 
         cfg!(feature = "server")
     );
+    let loading = use_signal(|| true);
+    let mut active_tab = use_signal(|| "all".to_string());
+
+    // Search functionality
+    let mut search_query = use_signal(|| String::new());
 
     #[cfg(feature = "server")]
     {
         let downloads = use_signal(|| Vec::<Download>::new());
-        let loading = use_signal(|| true);
-        let mut active_tab = use_signal(|| "all".to_string());
-
-        // Search functionality
-        let mut search_query = use_signal(|| String::new());
-
         // Only fetch downloads when the component is first mounted
         use_effect(move || {
             if loading() {
