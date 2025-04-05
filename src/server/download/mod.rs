@@ -1,5 +1,9 @@
 // Download functionality module
 
+// Export our services for download operations
+mod services;
+pub use services::*;
+
 // Types
 pub mod types;
 pub use types::*;
