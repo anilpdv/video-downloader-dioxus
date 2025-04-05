@@ -3,10 +3,14 @@ use serde_json;
 use server_fn::error::NoCustomError;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[cfg(feature = "server")]
 use tokio::fs;
 use tracing;
 
+#[cfg(feature = "server")]
 use super::database::save_download_info;
+#[cfg(feature = "server")]
 use crate::server::download::{storage, types::DownloadProgress, utils};
 
 #[cfg(feature = "server")]

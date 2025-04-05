@@ -1,9 +1,12 @@
 use dioxus::prelude::*;
 use serde_json;
 use server_fn::error::NoCustomError;
+
+#[cfg(feature = "server")]
 use tokio::fs;
 use tracing;
 
+#[cfg(feature = "server")]
 use crate::server::download::types::DownloadProgress;
 
 /// Get progress information for an ongoing download

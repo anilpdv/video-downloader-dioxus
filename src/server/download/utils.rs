@@ -1,9 +1,11 @@
+#[cfg(feature = "server")]
+use super::types::DownloadProgress;
 use std::io;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "server")]
 use tokio::fs;
 use tracing;
-
-use super::types::DownloadProgress;
 
 #[cfg(feature = "server")]
 pub async fn find_downloaded_file(dir: impl AsRef<Path>) -> io::Result<PathBuf> {

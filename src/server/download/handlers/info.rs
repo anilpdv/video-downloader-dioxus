@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 use serde_json;
 use server_fn::error::NoCustomError;
 use std::time::Duration;
+
+#[cfg(feature = "server")]
 use tokio::time::timeout;
 use tracing;
 
