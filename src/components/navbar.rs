@@ -20,10 +20,9 @@ pub fn Navbar() -> Element {
 
     // Determine if routes are active based on the current route
     let is_home = matches!(route, Route::Home {});
-    let is_blog = matches!(route, Route::Blog { .. });
     let is_download = matches!(route, Route::Download {});
+    #[cfg(feature = "desktop")]
     let is_downloads = matches!(route, Route::Downloads {});
-    let is_getinfo = matches!(route, Route::GetInfo {});
     let is_search = matches!(route, Route::Search {});
 
     rsx! {
@@ -78,21 +77,6 @@ pub fn Navbar() -> Element {
                             span { "Home" }
                         }
                     }
-                    // Blog link
-                    div {
-                        class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
-                        class: if !show_labels() { "justify-center" } else { "" },
-                        class: if is_blog { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
-                        onclick: move |_| {
-                            nav.replace(Route::Blog { id: 1 });
-                        },
-                        div { class: if show_labels() { "mr-3" } else { "" },
-                            Icon { icon: BsNewspaper, width: 20, height: 20 }
-                        }
-                        if show_labels() {
-                            span { "Blog" }
-                        }
-                    }
                     // Download link
                     div {
                         class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
@@ -124,37 +108,23 @@ pub fn Navbar() -> Element {
                         }
                     }
                     // My Downloads link
-                    div {
-                        class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
-                        class: if !show_labels() { "justify-center" } else { "" },
-                        class: if is_downloads { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
-                        onclick: move |_| {
-                            nav.replace(Route::Downloads {});
-                        },
-                        div { class: if show_labels() { "mr-3" } else { "" },
-                            Icon { icon: FaMusic, width: 20, height: 20 }
-                        }
-                        if show_labels() {
-                            span { "My Downloads" }
-                        }
-                    }
-                    // Get Info link
-                    div {
-                        class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
-                        class: if !show_labels() { "justify-center" } else { "" },
-                        class: if is_getinfo { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
-                        onclick: move |_| {
-                            nav.replace(Route::GetInfo {});
-                        },
-                        div { class: if show_labels() { "mr-3" } else { "" },
-                            Icon {
-                                icon: BsInfoCircleFill,
-                                width: 20,
-                                height: 20,
+                    {
+                        #[cfg(feature = "desktop")]
+                        rsx! {
+                            div {
+                                class: "flex items-center py-3 px-3 mb-2 rounded-lg transition-all duration-200",
+                                class: if !show_labels() { "justify-center" } else { "" },
+                                class: if is_downloads { "bg-primary-600 text-text-primary shadow-glow" } else { "text-text-muted hover:bg-background-hover hover:text-text-primary" },
+                                onclick: move |_| {
+                                    nav.replace(Route::Downloads {});
+                                },
+                                div { class: if show_labels() { "mr-3" } else { "" },
+                                    Icon { icon: FaMusic, width: 20, height: 20 }
+                                }
+                                if show_labels() {
+                                    span { "My Downloads" }
+                                }
                             }
-                        }
-                        if show_labels() {
-                            span { "Get Info" }
                         }
                     }
                 }

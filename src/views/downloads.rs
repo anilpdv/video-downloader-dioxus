@@ -2,6 +2,7 @@ use crate::common::Toaster;
 use crate::components::download_progress::{DownloadInfo, DownloadStatus};
 use dioxus::prelude::Signal;
 use dioxus::prelude::*;
+use dioxus_free_icons::icons::fa_solid_icons::{FaPause, FaPlay};
 use dioxus_free_icons::{
     icons::{
         bs_icons::{BsExclamationTriangleFill, BsSearch},
@@ -215,12 +216,12 @@ pub fn Downloads() -> Element {
 // Content component - handles UI logic separate from data fetching
 #[component]
 fn DownloadsContent() -> Element {
-    let mut active_tab = use_signal(|| "all".to_string());
-    let mut search_query = use_signal(|| String::new());
+    let active_tab = use_signal(|| "all".to_string());
+    let search_query = use_signal(|| String::new());
 
     // State for downloads
     let downloads = use_signal(|| Vec::<DownloadItem>::new());
-    let mut loading = use_signal(|| true);
+    let loading = use_signal(|| true);
 
     // New state for active downloads with progress
     let active_downloads = use_signal(|| HashMap::<String, DownloadInfo>::new());
@@ -306,131 +307,6 @@ fn DownloadsContent() -> Element {
 
     // Determine if we have downloads to show
     let has_downloads = !downloads().is_empty();
-
-    // If we're on web, show a demo section even if no downloads
-    #[cfg(feature = "web")]
-    {
-        return rsx! {
-            // Demo section for web
-            div { class: "mb-10",
-                // Show active downloads if any
-                {
-                    if !active_downloads().is_empty() {
-                        rsx! {
-                            div { class: "mb-8",
-                                h2 { class: "text-xl font-semibold mb-4", "Active Downloads" }
-                            
-                                {
-                                    let downloads_map = active_downloads();
-                                    downloads_map
-                                        .iter()
-                                        .map(|(_, info)| {
-                                            let info_clone = info.clone();
-                                            let url_clone = info.url.clone();
-                                            let filename_clone = info.file_name.clone();
-                                            rsx! {
-                                                crate::components::DownloadProgress {
-                                                    download_info: Signal::new(info_clone),
-                                                    on_download_click: move |_| { handle_download(url_clone.clone(), filename_clone.clone()) },
-                                                }
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .into_iter()
-                                }
-                            }
-                        }
-                    } else {
-                        rsx! {
-                            div { class: "text-center py-12 bg-background-card rounded-xl border border-border shadow-md mb-10",
-                                div { class: "flex justify-center mb-6",
-                                    Icon {
-                                        icon: FaDownload,
-                                        width: 52,
-                                        height: 52,
-                                        class: "text-text-muted",
-                                    }
-                                }
-                                p { class: "text-xl font-medium text-text-primary", "Try downloading a sample file" }
-                                p { class: "text-text-secondary mt-2 max-w-md mx-auto",
-                                    "This web demo can download and save files to your device. Try one of the samples below:"
-                                }
-                            
-                                div { class: "mt-6 flex flex-col md:flex-row justify-center gap-3",
-                                    // Short video sample
-                                    button {
-                                        class: "bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
-                                        onclick: move |_| handle_download(
-                                            "https://download.samplelib.com/mp4/sample-5s.mp4".to_string(),
-                                            "sample-video-short.mp4".to_string(),
-                                        ),
-                                        Icon {
-                                            icon: FaVideo,
-                                            width: 18,
-                                            height: 18,
-                                            class: "mr-2",
-                                        }
-                                        "Short Video (5s)"
-                                    }
-                            
-                                    // Medium video sample
-                                    button {
-                                        class: "bg-accent-teal hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
-                                        onclick: move |_| handle_download(
-                                            "https://download.samplelib.com/mp4/sample-15s.mp4".to_string(),
-                                            "sample-video-medium.mp4".to_string(),
-                                        ),
-                                        Icon {
-                                            icon: FaVideo,
-                                            width: 18,
-                                            height: 18,
-                                            class: "mr-2",
-                                        }
-                                        "Medium Video (15s)"
-                                    }
-                            
-                                    // Audio sample
-                                    button {
-                                        class: "bg-accent-amber hover:bg-opacity-80 text-text-invert py-2 px-6 rounded-lg text-base transition-colors flex items-center",
-                                        onclick: move |_| handle_download(
-                                            "https://download.samplelib.com/mp3/sample-3s.mp3".to_string(),
-                                            "sample-audio.mp3".to_string(),
-                                        ),
-                                        Icon {
-                                            icon: FaMusic,
-                                            width: 18,
-                                            height: 18,
-                                            class: "mr-2",
-                                        }
-                                        "Audio Sample (3s)"
-                                    }
-                                }
-                            
-                                p { class: "text-text-secondary text-xs mt-4",
-                                    "Sample files from SampleLib.com - https://samplelib.com/"
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Regular downloads section (if any)
-                {
-                    if has_downloads {
-                        rsx! {
-                            DownloadsGrid {
-                                downloads: downloads.clone(),
-                                active_tab: active_tab.clone(),
-                                search_query: search_query.clone(),
-                            }
-                        }
-                    } else {
-                        rsx! {}
-                    }
-                }
-            }
-        };
-    }
 
     // For non-web platforms
     #[cfg(not(feature = "web"))]
@@ -668,16 +544,32 @@ fn LoadingSpinner() -> Element {
 fn DownloadCard(download: DownloadItem) -> Element {
     let is_video = &download.format_type == "video";
     let is_audio = &download.format_type == "audio";
+    let mut play_video = use_signal(|| false);
+    tracing::info!("play_video: {}", download.file_path);
+    let file_path = use_hook(|| download.file_path.clone());
 
     rsx! {
         div { class: "bg-background-card rounded-xl shadow-md overflow-hidden hover:shadow-lg transition-all duration-300 border border-border transform hover:-translate-y-1 hover:border-border-light",
             // Thumbnail area
             div { class: "relative aspect-video bg-background-dark",
                 if let Some(ref thumbnail) = download.thumbnail_url {
-                    img {
-                        class: "w-full h-full object-cover",
-                        src: "{thumbnail}",
-                        alt: "Thumbnail",
+                    if play_video() {
+                        video {
+                            class: "w-full h-full object-cover",
+                            src: "file:///Users/anilpdv/Documents/youtube_downloader/media/Rick%20Astley%20-%20Never%20Gonna%20Give%20You%20Up%20(Official%20Music%20Video).mp4",
+                            alt: "Thumbnail",
+                            controls: true,
+                            autoplay: true,
+                            onerror: move |e| {
+                                tracing::error!("Error loading video: {:?}", e);
+                            },
+                        }
+                    } else {
+                        img {
+                            class: "w-full h-full object-cover",
+                            src: "{thumbnail}",
+                            alt: "Thumbnail",
+                        }
                     }
                 } else {
                     div { class: "w-full h-full flex items-center justify-center bg-gradient-to-r from-background-darker to-background",
@@ -695,6 +587,26 @@ fn DownloadCard(download: DownloadItem) -> Element {
                                 height: 48,
                                 class: "text-accent-teal opacity-50",
                             }
+                        }
+                    }
+                }
+
+                div {
+                    class: "absolute top-16 right-36 bg-background-darker bg-opacity-75 text-text-primary text-xs  rounded-full flex items-center cursor-pointer p-4",
+                    onclick: move |_| play_video.set(!play_video()),
+                    if play_video() {
+                        Icon {
+                            icon: FaPause,
+                            width: 32,
+                            height: 32,
+                            class: "justify-center",
+                        }
+                    } else {
+                        Icon {
+                            icon: FaPlay,
+                            width: 32,
+                            height: 32,
+                            class: "justify-center",
                         }
                     }
                 }
@@ -775,7 +687,7 @@ fn DownloadCard(download: DownloadItem) -> Element {
                                 let file_path = download.file_path.clone();
                                 move |_| data_access::open_file(&file_path)
                             },
-                            "Play Media"
+                            "Play"
                         }
 
                         // Open folder button

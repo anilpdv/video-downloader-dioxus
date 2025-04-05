@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use components::Navbar;
-use views::{Blog, Download, Downloads, GetInfo, Home, Search};
+use views::{Download, Downloads, Home, Search};
 
 mod components;
 mod database;
@@ -19,14 +19,10 @@ enum Route {
     #[layout(Navbar)]
     #[route("/")]
     Home {},
-    #[route("/blog/:id")]
-    Blog { id: i32 },
     #[route("/download")]
     Download {},
     #[route("/downloads")]
     Downloads {},
-    #[route("/getinfo")]
-    GetInfo {},
     #[route("/search")]
     Search {},
 }
