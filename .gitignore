@@ -8,3 +8,5 @@
 
 # Ignore all files in the downloads directory
 dioxus_docs.txt
+
+/node_modules
