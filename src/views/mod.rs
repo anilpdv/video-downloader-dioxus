@@ -1,5 +1,5 @@
 pub mod download;
-pub use download::Download;
+pub use download::DownloadPage;
 
 pub mod downloads;
 pub use downloads::Downloads;

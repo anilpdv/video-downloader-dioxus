@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use components::Navbar;
-use views::{Download, Downloads, Home, Search};
+use views::{DownloadPage, Downloads, Home, Search};
 
 mod components;
 mod database;
@@ -22,7 +22,7 @@ enum Route {
     
     // Simple route with URL parameters
     #[route("/download/:url/:format")]
-    Download { url: String, format: String },
+    DownloadPage { url: String, format: String },
     
     #[route("/downloads")]
     Downloads {},

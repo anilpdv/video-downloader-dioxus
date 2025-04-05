@@ -66,7 +66,7 @@ pub fn Search() -> Element {
         };
 
         // Navigate to download route with parameters
-        navigator.push(Route::Download {
+        navigator.push(Route::DownloadPage {
             url: video_url,
             format: format_string.to_string(),
         });

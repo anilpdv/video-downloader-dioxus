@@ -1,14 +1,14 @@
 use dioxus::prelude::*;
 
-// Enum for format type selection
-#[derive(Clone, PartialEq)]
+/// Format type for download (audio or video)
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub enum FormatType {
-    Video,
     Audio,
+    Video,
 }
 
-// Enum for quality selection
-#[derive(Clone, PartialEq)]
+/// Quality options for media downloads
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub enum Quality {
     Highest,
     Medium,
