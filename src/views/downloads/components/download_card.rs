@@ -3,6 +3,7 @@ use dioxus_free_icons::icons::bs_icons::BsExclamationTriangleFill;
 use dioxus_free_icons::icons::fa_solid_icons::{
     FaCalendar, FaDatabase, FaMusic, FaPause, FaPlay, FaTrash, FaVideo,
 };
+use dioxus_free_icons::icons::hi_solid_icons::HiRefresh;
 use dioxus_free_icons::Icon;
 
 use crate::views::downloads::data_access;
@@ -11,6 +12,8 @@ use crate::views::downloads::types::DownloadItem;
 pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Element {
     let is_audio = &download.format_type == "audio";
     let mut play_video = use_signal(|| false);
+    let mut is_loading = use_signal(|| false);
+    let mut load_error = use_signal(|| false);
     let file_path = use_hook(|| download.file_path.clone());
     let mut confirm_delete = use_signal(|| false);
 
@@ -21,6 +24,14 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
             on_delete.call(id);
         }
         confirm_delete.set(false);
+    };
+
+    // Function to toggle video play state
+    let toggle_play = move |_| {
+        if !play_video() {
+            is_loading.set(true);
+        }
+        play_video.set(!play_video());
     };
 
     rsx! {
@@ -57,24 +68,38 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
                     title: "Delete download",
                     Icon { icon: FaTrash, width: 14, height: 14 }
                 }
-                // Rest of your component remains unchanged
+
+                // Video/Thumbnail content
                 if let Some(ref thumbnail) = download.thumbnail_url {
+                    // Show thumbnail when not playing video
+                    if !play_video() {
+                        img {
+                            class: "w-full h-full object-cover",
+                            src: "{thumbnail}",
+                            alt: "Thumbnail",
+                        }
+                    }
+                    // Show video when playing
                     if play_video() {
                         video {
                             class: "w-full h-full object-cover",
                             src: "{file_path}",
                             alt: "Thumbnail",
                             controls: true,
+                            preload: "metadata", // Only load metadata initially
                             autoplay: true,
+                            onloadstart: move |_| {
+                                is_loading.set(true);
+                            },
+                            oncanplay: move |_| {
+                                is_loading.set(false);
+                            },
                             onerror: move |e| {
                                 tracing::error!("Error loading video: {:?}", e);
+                                is_loading.set(false);
+                                load_error.set(true);
+                                play_video.set(false);
                             },
-                        }
-                    } else {
-                        img {
-                            class: "w-full h-full object-cover",
-                            src: "{thumbnail}",
-                            alt: "Thumbnail",
                         }
                     }
                 } else {
@@ -97,12 +122,48 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
                     }
                 }
 
+                // Loading spinner overlay
+                if is_loading() {
+                    div { class: "absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 z-20",
+                        div { class: "w-12 h-12 animate-spin rounded-full border-4 border-background-card border-t-accent-teal" }
+                    }
+                }
+
+                // Error message overlay
+                if load_error() {
+                    div { class: "absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 z-20",
+                        div { class: "bg-background-dark p-4 rounded-lg max-w-xs text-center",
+                            div { class: "text-accent-rose mb-2 flex justify-center",
+                                Icon {
+                                    icon: BsExclamationTriangleFill,
+                                    width: 24,
+                                    height: 24,
+                                }
+                            }
+                            p { class: "text-white text-sm mb-3",
+                                "This video couldn't be played in the browser. Please use the Play button below to open in your default player."
+                            }
+                            button {
+                                class: "bg-accent-teal hover:bg-opacity-80 text-text-invert py-1 px-2 rounded-md text-xs flex items-center mx-auto",
+                                onclick: move |_| load_error.set(false),
+                                Icon {
+                                    icon: HiRefresh,
+                                    width: 12,
+                                    height: 12,
+                                    class: "mr-1",
+                                }
+                                "Try Again"
+                            }
+                        }
+                    }
+                }
+
                 // Only show play button when video is not playing
                 if !play_video() {
                     div { class: "absolute inset-0 flex items-center justify-center",
                         div {
                             class: "bg-black bg-opacity-40 text-white rounded-full flex items-center justify-center cursor-pointer w-14 h-14 transition-all duration-200 hover:bg-opacity-60 hover:scale-110 shadow-lg",
-                            onclick: move |_| play_video.set(true),
+                            onclick: toggle_play,
                             div { class: "ml-1", // Slight offset for play icon (visual centering)
                                 Icon {
                                     icon: FaPlay,
@@ -115,12 +176,12 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
                     }
                 }
 
-                // Show a small pause button when video is playing (less intrusive)
-                if play_video() {
+                // Show a small pause button when video is playing
+                if play_video() && !is_loading() && !load_error() {
                     div { class: "absolute bottom-4 right-4",
                         div {
                             class: "bg-black bg-opacity-40 text-white rounded-full flex items-center justify-center cursor-pointer p-2 transition-all duration-200 hover:bg-opacity-60",
-                            onclick: move |_| play_video.set(false),
+                            onclick: toggle_play,
                             Icon {
                                 icon: FaPause,
                                 width: 16,
