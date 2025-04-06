@@ -1,7 +1,7 @@
-use crate::common::Toaster;
-use crate::server::youtube::{search_youtube_videos, VideoSearchResult};
+use crate::server::download::api::search::search_youtube_videos;
 use crate::views::download::FormatType;
 use crate::Route;
+use crate::{common::Toaster, server::VideoSearchResult};
 use dioxus::prelude::*;
 use dioxus_free_icons::{
     icons::{

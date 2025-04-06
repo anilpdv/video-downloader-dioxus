@@ -1,11 +1,18 @@
+use dioxus::prelude::{server_fn::error::NoCustomError, ServerFnError};
+
 use super::types::DownloadItem;
-use crate::components::download_progress::{DownloadInfo, DownloadStatus};
+use crate::{
+    components::download_progress::{DownloadInfo, DownloadStatus},
+    server::DeleteDownload,
+};
 
 #[cfg(not(feature = "web"))]
 pub async fn fetch_downloads() -> Vec<DownloadItem> {
+    use crate::server::core::fetch_downloads;
+
     #[cfg(feature = "server")]
     {
-        crate::server::download::services::fetch_downloads().await
+        fetch_downloads().await
     }
     #[cfg(not(feature = "server"))]
     {
@@ -22,7 +29,7 @@ pub async fn fetch_downloads() -> Vec<DownloadItem> {
 pub fn open_file(path: &str) {
     #[cfg(feature = "server")]
     {
-        let _ = crate::server::download::services::open_file(path);
+        let _ = crate::server::download::platform::open_file(path);
     }
 }
 
@@ -37,7 +44,7 @@ pub fn open_file(path: &str) {
 pub fn open_containing_folder(path: &str) {
     #[cfg(feature = "server")]
     {
-        let _ = crate::server::download::services::open_containing_folder(path);
+        let _ = crate::server::download::platform::open_containing_folder(path);
     }
 }
 
@@ -75,7 +82,7 @@ where
             ..Default::default()
         };
 
-        use crate::server::download::handlers::video;
+        use crate::server::download::api::video;
 
         on_progress(download_info.clone());
 

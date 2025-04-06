@@ -1,10 +1,13 @@
 use dioxus::prelude::*;
-use dioxus_free_icons::icons::bs_icons::BsSearch;
-use dioxus_free_icons::icons::fa_solid_icons::{FaMusic, FaVideo};
+use dioxus_free_icons::icons::bs_icons::{BsExclamationTriangleFill, BsSearch};
+use dioxus_free_icons::icons::fa_solid_icons::{FaMusic, FaTrash, FaVideo};
 use dioxus_free_icons::icons::hi_outline_icons::{HiFilm, HiMusicNote, HiViewGrid};
 use dioxus_free_icons::Icon;
 
 use super::download_card::DownloadCard;
+use super::loading_spinner::LoadingSpinner;
+use crate::server::delete_download;
+use crate::views::downloads::data_access;
 use crate::views::downloads::types::DownloadItem;
 
 #[component]
@@ -49,6 +52,42 @@ pub fn DownloadsGrid(
         .count();
     let total_count = audio_count + video_count;
 
+    // Add state for deletion
+    let mut is_deleting = use_signal(|| false);
+    let mut deletion_error = use_signal(|| None::<String>);
+
+    // Handle delete event
+    let handle_delete = move |id: i64| {
+        tracing::info!("Handling delete for ID: {}", id);
+
+        is_deleting.set(true);
+        deletion_error.set(None);
+
+        let mut downloads_clone = downloads.clone();
+        let mut is_deleting_clone = is_deleting.clone();
+        let mut deletion_error_clone = deletion_error.clone();
+
+        spawn(async move {
+            match delete_download(id).await {
+                Ok(true) => {
+                    tracing::info!("Successfully deleted download with ID: {}", id);
+                    downloads_clone.with_mut(|list| {
+                        list.retain(|item| item.id != Some(id));
+                    });
+                }
+                Ok(false) => {
+                    tracing::warn!("Delete operation failed, item not found: {}", id);
+                    deletion_error_clone.set(Some("Item not found or already deleted".to_string()));
+                }
+                Err(e) => {
+                    tracing::error!("Error deleting download: {}", e);
+                    deletion_error_clone.set(Some(format!("Error deleting: {}", e)));
+                }
+            }
+            is_deleting_clone.set(false);
+        });
+    };
+
     rsx! {
         div { class: "mb-6 relative",
             div { class: "relative",
@@ -66,6 +105,27 @@ pub fn DownloadsGrid(
                     placeholder: "Search downloads...",
                     value: "{search_query}",
                     oninput: move |e| search_query.set(e.value().clone()),
+                }
+            }
+        }
+        // Error message for deletion
+        if let Some(error) = deletion_error() {
+            div { class: "mb-4 p-4 bg-background-card border border-accent-rose rounded-lg shadow-md",
+                div { class: "flex items-start justify-between",
+                    div { class: "flex items-start",
+                        Icon {
+                            icon: BsExclamationTriangleFill,
+                            width: 16,
+                            height: 16,
+                            class: "text-accent-rose mt-0.5 mr-2 flex-shrink-0",
+                        }
+                        div { class: "text-sm text-text-primary", "{error}" }
+                    }
+                    button {
+                        class: "text-text-muted hover:text-text-primary ml-4",
+                        onclick: move |_| deletion_error.set(None),
+                        "×"
+                    }
                 }
             }
         }
@@ -106,6 +166,15 @@ pub fn DownloadsGrid(
                         class: "mr-2",
                     }
                     "Video ({video_count})"
+                }
+            }
+        }
+        // Loading overlay for deletion
+        if is_deleting() {
+            div { class: "fixed inset-0 z-50 bg-background-darker bg-opacity-50 backdrop-blur-sm flex items-center justify-center",
+                div { class: "bg-background-card p-4 rounded-lg shadow-lg border border-border flex items-center",
+                    div { class: "animate-spin w-5 h-5 border-2 border-accent-teal border-t-transparent rounded-full mr-3" }
+                    p { class: "text-text-primary text-sm", "Deleting..." }
                 }
             }
         }
@@ -161,7 +230,7 @@ pub fn DownloadsGrid(
         } else {
             div { class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6",
                 for download in filtered_downloads {
-                    DownloadCard { download }
+                    DownloadCard { download: download.clone(), on_delete: handle_delete }
                 }
             }
         }

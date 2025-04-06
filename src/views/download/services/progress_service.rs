@@ -1,5 +1,4 @@
-use crate::server::download::handlers::get_download_progress;
-use crate::views::download::platforms::format_eta;
+use crate::{server::get_download_progress, views::download::platforms::format_eta};
 use dioxus::prelude::*;
 
 // Platform-specific timing module

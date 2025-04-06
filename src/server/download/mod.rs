@@ -1,33 +1,13 @@
-// Download functionality module
+//! Download functionality module
+//! Provides functionality for downloading media from various sources
 
-// Export our services for download operations
-pub mod services;
-pub use services::*;
+pub(crate) mod core;
+pub use core::types::*;
 
-// Web-specific services
-#[cfg(feature = "web")]
-pub mod web_services;
-#[cfg(feature = "web")]
-pub use web_services::*;
+pub(crate) mod api;
+pub(crate) mod platform;
+pub(crate) mod provider;
+pub(crate) mod storage;
 
-// Types
-pub mod types;
-pub use types::*;
-
-// Utilities
-pub mod utils;
-pub use utils::*;
-
-// yt-dlp handling
-pub mod ytdlp;
-pub use ytdlp::*;
-
-// File storage handling
-pub mod storage;
-pub use storage::*;
-
-// Server handlers
-pub mod handlers;
-pub use handlers::*;
-
-// Integrate all modules
+// Re-export the main public API
+pub use api::*;
