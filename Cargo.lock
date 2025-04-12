@@ -6087,6 +6087,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "vlc-rs",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -6682,6 +6683,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vlc-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6223b2d4a7b2977e0758cbff1cb00df37236f91de4593da47f8a2737ac59a96e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "wait-timeout"

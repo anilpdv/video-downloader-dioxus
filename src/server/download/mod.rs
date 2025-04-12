@@ -6,6 +6,7 @@ pub use core::types::*;
 
 pub(crate) mod api;
 pub(crate) mod platform;
+pub mod player;
 pub(crate) mod provider;
 pub(crate) mod storage;
 

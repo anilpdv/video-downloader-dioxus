@@ -1,3 +1,4 @@
+use dioxus::prelude::use_effect;
 use dioxus::prelude::*;
 use dioxus_free_icons::icons::bs_icons::BsExclamationTriangleFill;
 use dioxus_free_icons::icons::fa_solid_icons::{
@@ -52,6 +53,15 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
     // Function to open file in external player
     let handle_open_file = move || {
         data_access::open_file(&file_path_for_main);
+    };
+
+    // Just use a hardcoded player type for now until we fix the async issues
+    let player_type = if vlc_available {
+        "External VLC"
+    } else if cfg!(feature = "vlc") {
+        "Embedded VLC"
+    } else {
+        "System Default"
     };
 
     // Toggle player visibility with improved error handling
@@ -175,9 +185,18 @@ pub fn DownloadCard(download: DownloadItem, on_delete: EventHandler<i64>) -> Ele
                     div { class: "absolute top-2 left-2 bg-accent-amber bg-opacity-75 text-text-invert text-xs px-2 py-1 rounded-full",
                         if vlc_available {
                             "Large File • Embedded VLC Available"
+                        } else if player_type == "External VLC" {
+                            "Large File • Embedded Player Available"
                         } else {
                             "Large File • External Player Recommended"
                         }
+                    }
+                }
+
+                // Add player info message when it's not available
+                if !vlc_available && is_large_file && player_type == "Web Player" {
+                    div { class: "absolute top-12 left-2 bg-accent-rose bg-opacity-75 text-text-invert text-xs px-2 py-1 rounded-full z-10",
+                        "VLC Not Found - Install for Better Playback"
                     }
                 }
 
