@@ -119,9 +119,10 @@ async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
 /// Get the path to the database file
 #[cfg(feature = "server")]
 fn get_desktop_database_path() -> PathBuf {
-    // Always use ~/Documents/youtube_downloader folder for desktop app
-    if let Some(home_dir) = dirs::home_dir() {
-        let app_dir = home_dir.join("Documents").join("youtube_downloader");
+    // Use app data directory instead of Documents folder
+    // This is more accessible on macOS (no permission dialogs)
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let app_dir = data_dir.join("youtube_downloader");
 
         // Create directory with proper permissions
         if !app_dir.exists() {
@@ -191,7 +192,7 @@ fn get_desktop_database_path() -> PathBuf {
     }
 
     // Fallback to in-memory database
-    println!("WARNING: Could not determine home directory, using in-memory database");
+    println!("WARNING: Could not determine app data directory, using in-memory database");
     PathBuf::from(":memory:")
 }
 

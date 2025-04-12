@@ -3,11 +3,9 @@ use tracing;
 
 #[cfg(feature = "server")]
 pub fn ensure_media_directory() -> Option<PathBuf> {
-    if let Some(home_dir) = dirs::home_dir() {
-        let media_dir = home_dir
-            .join("Documents")
-            .join("youtube_downloader")
-            .join("media");
+    // Use app data directory instead of Documents folder for better permissions handling
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let media_dir = data_dir.join("youtube_downloader").join("media");
 
         // Create directory with proper permissions
         if let Err(e) = std::fs::create_dir_all(&media_dir) {

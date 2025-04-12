@@ -29,7 +29,8 @@ pub async fn fetch_downloads() -> Vec<DownloadItem> {
 pub fn open_file(path: &str) {
     #[cfg(feature = "server")]
     {
-        let _ = crate::server::download::platform::open_file(path);
+        use crate::views::downloads::media_player;
+        media_player::open_with_best_player(path);
     }
 }
 
@@ -109,4 +110,9 @@ where
     {
         Err("Download not supported on this platform".to_string())
     }
+}
+
+pub fn get_media_url(path: &str) -> String {
+    use crate::views::downloads::media_player;
+    media_player::get_optimal_media_url(path)
 }
