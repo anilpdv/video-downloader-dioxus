@@ -10,3 +10,4 @@
 dioxus_docs.txt
 
 /node_modules
+/remove_comments.sh
